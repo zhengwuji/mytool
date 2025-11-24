@@ -19,8 +19,6 @@
     let ev = true;   
     let et = false; 
     let ex = false;
-    let es = false;
-    let ess2022 = false;
     let tp = '';  
 
     let scu = 'https://url.v1.mk/sub';  
@@ -437,16 +435,6 @@
                 const xhttpControl = getConfigValue('ex', env.ex);
                 if (xhttpControl !== undefined && xhttpControl !== '') {
                     ex = xhttpControl === 'yes' || xhttpControl === true || xhttpControl === 'true';
-                }
-                
-                const socks5Control = getConfigValue('es', env.es);
-                if (socks5Control !== undefined && socks5Control !== '') {
-                    es = socks5Control === 'yes' || socks5Control === true || socks5Control === 'true';
-                }
-                
-                const shadowsocks2022Control = getConfigValue('ess2022', env.ess2022);
-                if (shadowsocks2022Control !== undefined && shadowsocks2022Control !== '') {
-                    ess2022 = shadowsocks2022Control === 'yes' || shadowsocks2022Control === true || shadowsocks2022Control === 'true';
                 }
                 
                 scu = getConfigValue('scu', env.scu) || 'https://url.v1.mk/sub';
@@ -1351,12 +1339,6 @@
             if (ex) {
                 finalLinks.push(...generateXhttpLinksFromSource(list, user, workerDomain));
             }
-            if (es) {
-                finalLinks.push(...generateSocks5LinksFromSource(list, user, workerDomain));
-            }
-            if (ess2022) {
-                finalLinks.push(...generateShadowsocks2022LinksFromSource(list, user, workerDomain));
-            }
         }
 
         if (currentWorkerRegion === 'CUSTOM') {
@@ -1438,12 +1420,6 @@
                         }
                         if (et) {
                             finalLinks.push(...await generateTrojanLinksFromNewIPs(newIPList, user, workerDomain));
-                        }
-                        if (es) {
-                            finalLinks.push(...generateSocks5LinksFromNewIPs(newIPList, user, workerDomain));
-                        }
-                        if (ess2022) {
-                            finalLinks.push(...generateShadowsocks2022LinksFromNewIPs(newIPList, user, workerDomain));
                         }
                 }
             } catch (error) {
@@ -1802,19 +1778,6 @@
                         }
                     }
                     
-                    if (ess2022 && chunk.byteLength >= 16) {
-                        try {
-                            const ss2022Result = await parseShadowsocks2022Header(chunk, at);
-                            if (!ss2022Result.hasError) {
-                                protocolType = 'shadowsocks2022';
-                                const { addressType, port, hostname, rawClientData } = ss2022Result;
-                                await forwardTCP(addressType, hostname, port, rawClientData, serverSock, null, remoteConnWrapper);
-                                return;
-                            }
-                        } catch (ss2022Err) {
-                        }
-                    }
-                    
                     throw new Error('Invalid protocol or authentication failed');
                 }
             },
@@ -2056,8 +2019,6 @@
                     enableVLESS: '启用 VLESS 协议',
                     enableTrojan: '启用 Trojan 协议',
                     enableXhttp: '启用 xhttp 协议',
-                    enableSocks5: '启用 SOCKS5 协议',
-                    enableShadowsocks2022: '启用 Shadowsocks 2022 协议',
                     trojanPassword: 'Trojan 密码 (可选):',
                     customPath: '自定义路径 (d):',
                     customIP: '自定义ProxyIP (p):',
@@ -2091,7 +2052,7 @@
                     autoSubscriptionCopied: '自动识别订阅链接已复制，客户端访问时会根据User-Agent自动识别并返回对应格式',
                     trojanPasswordPlaceholder: '留空则自动使用 UUID',
                     trojanPasswordHint: '设置自定义 Trojan 密码。留空则使用 UUID。客户端会自动对密码进行 SHA224 哈希。',
-                    protocolHint: '可以同时启用多个协议。订阅将生成选中协议的节点。<br>• VLESS WS: 基于 WebSocket 的标准协议<br>• Trojan: 使用 SHA224 密码认证<br>• xhttp: 基于 HTTP POST 的伪装协议（需要绑定自定义域名并开启 gRPC）<br>• SOCKS5: 标准 SOCKS5 代理协议<br>• Shadowsocks 2022: 通过 VLESS WebSocket 传输的 Shadowsocks 2022 兼容模式（兼容 v2rayN 等客户端）',
+                    protocolHint: '可以同时启用多个协议。订阅将生成选中协议的节点。<br>• VLESS WS: 基于 WebSocket 的标准协议<br>• Trojan: 使用 SHA224 密码认证<br>• xhttp: 基于 HTTP POST 的伪装协议（需要绑定自定义域名并开启 gRPC）',
                     saveProtocol: '保存协议配置',
                     subscriptionConverterPlaceholder: '默认: https://url.v1.mk/sub',
                     subscriptionConverterHint: '自定义订阅转换API地址，留空则使用默认地址',
@@ -2381,18 +2342,6 @@
                                             <span style="font-size: 1.1rem;">${t.enableXhttp}</span>
                                     </label>
                                 </div>
-                                <div style="margin-bottom: 10px;">
-                                    <label style="display: inline-flex; align-items: center; cursor: pointer; color: #ffffff;">
-                                        <input type="checkbox" id="es" style="margin-right: 8px; width: 18px; height: 18px; cursor: pointer;">
-                                            <span style="font-size: 1.1rem;">${t.enableSocks5}</span>
-                                    </label>
-                                </div>
-                                <div style="margin-bottom: 10px;">
-                                    <label style="display: inline-flex; align-items: center; cursor: pointer; color: #ffffff;">
-                                        <input type="checkbox" id="ess2022" style="margin-right: 8px; width: 18px; height: 18px; cursor: pointer;">
-                                            <span style="font-size: 1.1rem;">${t.enableShadowsocks2022}</span>
-                                    </label>
-                                </div>
                                 <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid rgba(0, 255, 0, 0.3);">
                                         <label style="display: block; margin-bottom: 8px; color: #ffffff; font-size: 0.95rem;">${t.trojanPassword}</label>
                                         <input type="text" id="tp" placeholder="${t.trojanPasswordPlaceholder}" style="width: 100%; padding: 10px; background: rgba(0, 0, 0, 0.3); border: 1px solid #ffffff; color: #ffffff; font-family: 'Courier New', monospace; font-size: 13px;">
@@ -2435,7 +2384,7 @@
                         <div style="margin-bottom: 15px;">
                                 <label style="display: block; margin-bottom: 8px; color: #ffffff; font-weight: bold; text-shadow: 0 0 3px #ffffff;">${t.socks5Config}</label>
                                 <input type="text" id="socksConfig" placeholder="例如: user:pass@host:port 或 host:port" style="width: 100%; padding: 12px; background: rgba(0, 0, 0, 0.3); border: 2px solid #ffffff; color: #ffffff; font-family: 'Courier New', monospace; font-size: 14px;">
-                                <small style="color: #ffffff; font-size: 0.85rem;">SOCKS5代理地址（用于特定协议）</small>
+                                <small style="color: #ffffff; font-size: 0.85rem;">SOCKS5代理地址（用于特定协议），用于出站所有流量功能</small>
                         </div>
                             <button type="submit" style="background: rgba(0, 255, 0, 0.15); border: 2px solid #ffffff; padding: 12px 24px; color: #ffffff; font-family: 'Courier New', monospace; font-weight: bold; cursor: pointer; margin-right: 10px; text-shadow: 0 0 8px #ffffff; transition: all 0.4s ease;">${t.saveConfig}</button>
                     </form>
@@ -3075,8 +3024,6 @@
                     document.getElementById('ev').checked = config.ev !== 'no';
                     document.getElementById('et').checked = config.et === 'yes';
                     document.getElementById('ex').checked = config.ex === 'yes';
-                    if (document.getElementById('es')) document.getElementById('es').checked = config.es === 'yes';
-                    if (document.getElementById('ess2022')) document.getElementById('ess2022').checked = config.ess2022 === 'yes';
                     document.getElementById('tp').value = config.tp || '';
                     document.getElementById('scu').value = config.scu || '';
                     document.getElementById('epd').checked = config.epd !== 'no';
@@ -3241,7 +3188,7 @@
                                 rm: '',
                                 qj: '',
                                 dkby: '',
-                                yxby: '', ev: '', et: '', ex: '', es: '', tp: '', scu: '', epd: '', epi: '', egi: '',
+                                yxby: '', ev: '', et: '', ex: '', tp: '', scu: '', epd: '', epi: '', egi: '',
                                 ipv4: '', ipv6: '', ispMobile: '', ispUnicom: '', ispTelecom: '',
                                 homepage: ''
                             })
@@ -3315,16 +3262,12 @@
                             ev: document.getElementById('ev').checked ? 'yes' : 'no', 
                             et: document.getElementById('et').checked ? 'yes' : 'no', 
                             ex: document.getElementById('ex').checked ? 'yes' : 'no',
-                            es: document.getElementById('es') && document.getElementById('es').checked ? 'yes' : 'no',
-                            ess2022: document.getElementById('ess2022') && document.getElementById('ess2022').checked ? 'yes' : 'no',
                             tp: document.getElementById('tp').value
                         };
                         
                         if (!document.getElementById('ev').checked && 
                             !document.getElementById('et').checked && 
-                            !document.getElementById('ex').checked &&
-                            !(document.getElementById('es') && document.getElementById('es').checked) &&
-                            !(document.getElementById('ess2022') && document.getElementById('ess2022').checked)) {
+                            !document.getElementById('ex').checked) {
                             alert('至少需要启用一个协议！');
                             return;
                         }
@@ -3337,7 +3280,7 @@
                 if (otherConfigForm) {
                     otherConfigForm.addEventListener('submit', async function(e) {
                         e.preventDefault();
-                        const configData = { ev: document.getElementById('ev').checked ? 'yes' : 'no', et: document.getElementById('et').checked ? 'yes' : 'no', ex: document.getElementById('ex').checked ? 'yes' : 'no', es: document.getElementById('es') && document.getElementById('es').checked ? 'yes' : 'no', ess2022: document.getElementById('ess2022') && document.getElementById('ess2022').checked ? 'yes' : 'no', tp: document.getElementById('tp').value,
+                        const configData = { ev: document.getElementById('ev').checked ? 'yes' : 'no', et: document.getElementById('et').checked ? 'yes' : 'no', ex: document.getElementById('ex').checked ? 'yes' : 'no', tp: document.getElementById('tp').value,
                             d: document.getElementById('customPath').value,
                             p: document.getElementById('customIP').value,
                             yx: document.getElementById('preferredIPs').value,
@@ -3350,9 +3293,7 @@
                         // 确保至少选择一个协议
                         if (!document.getElementById('ev').checked && 
                             !document.getElementById('et').checked && 
-                            !document.getElementById('ex').checked &&
-                            !(document.getElementById('es') && document.getElementById('es').checked) &&
-                            !(document.getElementById('ess2022') && document.getElementById('ess2022').checked)) {
+                            !document.getElementById('ex').checked) {
                             alert('至少需要启用一个协议！');
                             return;
                         }
@@ -3488,110 +3429,6 @@
             hostname: address,
             rawClientData: socks5DataBuffer.slice(portIndex + 4)
         };
-    }
-
-    async function parseShadowsocks2022Header(buffer, ut) {
-        const passwordToUse = tp || ut;
-        
-        if (buffer.byteLength < 16) {
-            return {
-                hasError: true,
-                message: "invalid Shadowsocks 2022 data - too short"
-            };
-        }
-        
-        try {
-            const view = new DataView(buffer);
-            const saltLength = view.getUint8(0);
-            if (saltLength > 16 || buffer.byteLength < 1 + saltLength + 2) {
-                return {
-                    hasError: true,
-                    message: "invalid Shadowsocks 2022 salt length"
-                };
-            }
-            
-            const salt = new Uint8Array(buffer.slice(1, 1 + saltLength));
-            const payloadLength = view.getUint16(1 + saltLength, true);
-            
-            if (buffer.byteLength < 1 + saltLength + 2 + payloadLength) {
-                return {
-                    hasError: true,
-                    message: "invalid Shadowsocks 2022 payload length"
-                };
-            }
-            
-            const payloadStart = 1 + saltLength + 2;
-            const payload = new Uint8Array(buffer.slice(payloadStart, payloadStart + payloadLength));
-            
-            if (payload.byteLength < 6) {
-                return {
-                    hasError: true,
-                    message: "invalid Shadowsocks 2022 payload - too short for SOCKS5"
-                };
-            }
-            
-            const cmd = payload[0];
-            if (cmd !== 1) {
-                return {
-                    hasError: true,
-                    message: "unsupported command, only TCP (CONNECT) is allowed"
-                };
-            }
-            
-            const atype = payload[1];
-            let addressLength = 0;
-            let addressIndex = 2;
-            let address = "";
-            
-            switch (atype) {
-                case 1:
-                    addressLength = 4;
-                    address = Array.from(payload.slice(addressIndex, addressIndex + addressLength)).join(".");
-                    break;
-                case 3:
-                    addressLength = payload[addressIndex];
-                    addressIndex += 1;
-                    address = new TextDecoder().decode(payload.slice(addressIndex, addressIndex + addressLength));
-                    break;
-                case 4:
-                    addressLength = 16;
-                    const ipv6Parts = [];
-                    for (let i = 0; i < 8; i++) {
-                        ipv6Parts.push(((payload[addressIndex + i * 2] << 8) | payload[addressIndex + i * 2 + 1]).toString(16));
-                    }
-                    address = ipv6Parts.join(":");
-                    break;
-                default:
-                    return {
-                        hasError: true,
-                        message: `invalid addressType is ${atype}`
-                    };
-            }
-            
-            if (!address) {
-                return {
-                    hasError: true,
-                    message: `address is empty, addressType is ${atype}`
-                };
-            }
-            
-            const portIndex = addressIndex + addressLength;
-            const port = (payload[portIndex] << 8) | payload[portIndex + 1];
-            
-            return {
-                hasError: false,
-                addressRemote: address,
-                addressType: atype,
-                port: port,
-                hostname: address,
-                rawClientData: payload.slice(portIndex + 2)
-            };
-        } catch (error) {
-            return {
-                hasError: true,
-                message: "invalid Shadowsocks 2022 format: " + error.message
-            };
-        }
     }
 
     async function sha224Hash(text) {
@@ -4261,91 +4098,6 @@
             });
         });
         
-        return links;
-    }
-
-    function generateShadowsocks2022LinksFromSource(list, user, workerDomain) {
-        const CF_HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
-        const CF_HTTPS_PORTS = [443, 2053, 2083, 2087, 2096, 8443];
-        
-        const defaultHttpsPorts = [443];
-        const defaultHttpPorts = disableNonTLS ? [] : [80];
-        const links = [];
-        const wsPath = '/?ed=2048';
-        const proto = atob('dmxlc3M=');
-        
-        list.forEach(item => {
-            let nodeNameBase = item.isp.replace(/\s/g, '_');
-            if (item.colo && item.colo.trim()) {
-                nodeNameBase = `${nodeNameBase}-${item.colo.trim()}`;
-            }
-            const safeIP = item.ip.includes(':') ? `[${item.ip}]` : item.ip;
-            
-            let portsToGenerate = [];
-            
-            if (item.port) {
-                const port = item.port;
-                
-                if (CF_HTTPS_PORTS.includes(port)) {
-                    portsToGenerate.push({ port: port, tls: true });
-                } else if (CF_HTTP_PORTS.includes(port)) {
-                    if (!disableNonTLS) {
-                        portsToGenerate.push({ port: port, tls: false });
-                    }
-                } else {
-                    portsToGenerate.push({ port: port, tls: true });
-                }
-            } else {
-                defaultHttpsPorts.forEach(port => {
-                    portsToGenerate.push({ port: port, tls: true });
-                });
-                defaultHttpPorts.forEach(port => {
-                    portsToGenerate.push({ port: port, tls: false });
-                });
-            }
-
-            portsToGenerate.forEach(({ port, tls }) => {
-                const ss2022NodeName = `${nodeNameBase}-${port}-SS2022${tls ? '-TLS' : ''}`;
-                if (tls) {
-                    const link = `${proto}://${user}@${safeIP}:${port}?encryption=none&security=tls&sni=${workerDomain}&fp=chrome&type=ws&host=${workerDomain}&path=${wsPath}#${encodeURIComponent(ss2022NodeName)}`;
-                    links.push(link);
-                } else {
-                    if (!disableNonTLS) {
-                        const link = `${proto}://${user}@${safeIP}:${port}?encryption=none&security=none&type=ws&host=${workerDomain}&path=${wsPath}#${encodeURIComponent(ss2022NodeName)}`;
-                        links.push(link);
-                    }
-                }
-            });
-        });
-        
-        return links;
-    }
-
-    function generateShadowsocks2022LinksFromNewIPs(list, user, workerDomain) {
-        const CF_HTTP_PORTS = [80, 8080, 8880, 2052, 2082, 2086, 2095];
-        const CF_HTTPS_PORTS = [443, 2053, 2083, 2087, 2096, 8443];
-        
-        const links = [];
-        const wsPath = '/?ed=2048';
-        const proto = atob('dmxlc3M=');
-        
-        list.forEach(item => {
-            const nodeName = item.name.replace(/\s/g, '_');
-            const port = item.port;
-            
-            const isTLS = CF_HTTPS_PORTS.includes(port) || (!CF_HTTP_PORTS.includes(port));
-            const ss2022NodeName = `${nodeName}-${port}-SS2022${isTLS ? '-TLS' : ''}`;
-            
-            if (isTLS) {
-                const link = `${proto}://${user}@${item.ip}:${port}?encryption=none&security=tls&sni=${workerDomain}&fp=chrome&type=ws&host=${workerDomain}&path=${wsPath}#${encodeURIComponent(ss2022NodeName)}`;
-                links.push(link);
-            } else {
-                if (!disableNonTLS) {
-                    const link = `${proto}://${user}@${item.ip}:${port}?encryption=none&security=none&type=ws&host=${workerDomain}&path=${wsPath}#${encodeURIComponent(ss2022NodeName)}`;
-                    links.push(link);
-                }
-            }
-        });
         return links;
     }
 
