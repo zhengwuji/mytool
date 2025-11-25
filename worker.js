@@ -44,6 +44,7 @@ const regionMapping = {
     'JP': ['🇯🇵 日本', 'JP', 'Japan'],
     'HK': ['🇭🇰 香港', 'HK', 'Hong Kong'],
     'KR': ['🇰🇷 韩国', 'KR', 'South Korea'],
+    'TW': ['🇹🇼 台湾', 'TW', 'Taiwan'],
     'DE': ['🇩🇪 德国', 'DE', 'Germany'],
     'SE': ['🇸🇪 瑞典', 'SE', 'Sweden'],
     'NL': ['🇳🇱 荷兰', 'NL', 'Netherlands'],
@@ -61,6 +62,7 @@ let backupIPs = [
     { domain: 'ProxyIP.JP.CMLiussss.net', region: 'JP', regionCode: 'JP', port: 443 },
     { domain: 'ProxyIP.HK.CMLiussss.net', region: 'HK', regionCode: 'HK', port: 443 },
     { domain: 'ProxyIP.KR.CMLiussss.net', region: 'KR', regionCode: 'KR', port: 443 },
+    { domain: 'ProxyIP.TW.CMLiussss.net', region: 'TW', regionCode: 'TW', port: 443 },
     { domain: 'ProxyIP.DE.CMLiussss.net', region: 'DE', regionCode: 'DE', port: 443 },
     { domain: 'ProxyIP.SE.CMLiussss.net', region: 'SE', regionCode: 'SE', port: 443 },
     { domain: 'ProxyIP.NL.CMLiussss.net', region: 'NL', regionCode: 'NL', port: 443 },
@@ -183,9 +185,9 @@ async function detectWorkerRegion(request) {
         
         if (cfCountry) {
             const countryToRegion = {
-                'US': 'US', 'SG': 'SG', 'JP': 'JP', 'HK': 'HK', 'KR': 'KR',
+                'US': 'US', 'SG': 'SG', 'JP': 'JP', 'HK': 'HK', 'KR': 'KR', 'TW': 'TW',
                 'DE': 'DE', 'SE': 'SE', 'NL': 'NL', 'FI': 'FI', 'GB': 'GB',
-                'CN': 'HK', 'TW': 'HK', 'AU': 'SG', 'CA': 'US',
+                'CN': 'HK', 'AU': 'SG', 'CA': 'US',
                 'FR': 'DE', 'IT': 'DE', 'ES': 'DE', 'CH': 'DE',
                 'AT': 'DE', 'BE': 'NL', 'DK': 'SE', 'NO': 'SE', 'IE': 'GB'
             };
@@ -245,10 +247,11 @@ async function getBestBackupIP(workerRegion = '') {
 function getNearbyRegions(region) {
     const nearbyMap = {
         'US': ['SG', 'JP', 'HK', 'KR'], 
-        'SG': ['JP', 'HK', 'KR', 'US'], 
-        'JP': ['SG', 'HK', 'KR', 'US'], 
-        'HK': ['SG', 'JP', 'KR', 'US'], 
-        'KR': ['JP', 'HK', 'SG', 'US'], 
+        'SG': ['JP', 'HK', 'KR', 'US', 'TW'], 
+        'JP': ['SG', 'HK', 'KR', 'US', 'TW'], 
+        'HK': ['SG', 'JP', 'KR', 'TW', 'US'], 
+        'KR': ['JP', 'HK', 'SG', 'US', 'TW'], 
+        'TW': ['HK', 'JP', 'SG', 'KR', 'US'],
         'DE': ['NL', 'GB', 'SE', 'FI'], 
         'SE': ['DE', 'NL', 'FI', 'GB'], 
         'NL': ['DE', 'GB', 'SE', 'FI'], 
@@ -261,7 +264,7 @@ function getNearbyRegions(region) {
 
 function getAllRegionsByPriority(region) {
     const nearbyRegions = getNearbyRegions(region);
-    const allRegions = ['US', 'SG', 'JP', 'HK', 'KR', 'DE', 'SE', 'NL', 'FI', 'GB'];
+    const allRegions = ['US', 'SG', 'JP', 'HK', 'KR', 'TW', 'DE', 'SE', 'NL', 'FI', 'GB'];
     
     return [region, ...nearbyRegions, ...allRegions.filter(r => r !== region && !nearbyRegions.includes(r))];
 }
@@ -1309,6 +1312,18 @@ async function handleSubscriptionRequest(request, user, url = null) {
         const nativeList = [{ ip: workerDomain, isp: '原生地址' }];
         await addNodesFromList(nativeList);
     } else {
+        // 如果选择了特定地区（如台湾），优先使用该地区的IP
+        if (currentWorkerRegion && enableRegionMatching) {
+            const bestBackupIP = await getBestBackupIP(currentWorkerRegion);
+            if (bestBackupIP) {
+                fallbackAddress = bestBackupIP.domain;
+                fallbackPort = bestBackupIP.port.toString();
+                const backupList = [{ ip: fallbackAddress, isp: 'ProxyIP-' + currentWorkerRegion }];
+                await addNodesFromList(backupList);
+            }
+        }
+        
+        // 然后尝试添加原生地址
         try {
             const nativeList = [{ ip: workerDomain, isp: '原生地址' }];
             await addNodesFromList(nativeList);
@@ -1330,13 +1345,68 @@ async function handleSubscriptionRequest(request, user, url = null) {
         }
     }
 
+    // 如果设置了自定义yxURL但customPreferredIPs为空，尝试从URL获取IP
+    const defaultURL = 'https://raw.githubusercontent.com/qwer-search/bestip/refs/heads/main/kejilandbestip.txt';
+    if (customPreferredIPs.length === 0 && customPreferredDomains.length === 0 && piu && piu !== defaultURL) {
+        try {
+            const urlIPs = await fetchAndParseNewIPs();
+            if (urlIPs.length > 0) {
+                customPreferredIPs = urlIPs.map(item => ({
+                    ip: item.ip,
+                    port: item.port || 443,
+                    isp: item.name || item.ip
+                }));
+            }
+        } catch (error) {
+            // 如果获取失败，继续使用原有逻辑
+        }
+    }
+    
     const hasCustomPreferred = customPreferredIPs.length > 0 || customPreferredDomains.length > 0;
+    
+    // 辅助函数：从节点名称提取地区代码
+    function extractRegionFromNodeName(nodeName) {
+        if (!nodeName) return null;
+        const upperName = nodeName.toUpperCase();
+        for (const [region, aliases] of Object.entries(regionMapping)) {
+            for (const alias of aliases) {
+                if (upperName.includes(alias.toUpperCase()) || upperName.includes(region)) {
+                    if (['US', 'SG', 'JP', 'HK', 'KR', 'TW', 'DE', 'SE', 'NL', 'FI', 'GB'].includes(region)) {
+                        return region;
+                    }
+                }
+            }
+        }
+        return null;
+    }
     
     if (disablePreferred) {
     } else if (hasCustomPreferred) {
         
         if (customPreferredIPs.length > 0 && epi) {
-            await addNodesFromList(customPreferredIPs);
+            // 如果选择了特定地区，优先使用该地区的IP
+            if (currentWorkerRegion && enableRegionMatching && ['US', 'SG', 'JP', 'HK', 'KR', 'TW', 'DE', 'SE', 'NL', 'FI', 'GB'].includes(currentWorkerRegion)) {
+                const priorityRegions = getAllRegionsByPriority(currentWorkerRegion);
+                const sortedIPs = [];
+                
+                for (const region of priorityRegions) {
+                    const regionIPs = customPreferredIPs.filter(ip => {
+                        const nodeRegion = extractRegionFromNodeName(ip.isp);
+                        return nodeRegion === region;
+                    });
+                    sortedIPs.push(...regionIPs);
+                }
+                
+                // 添加匹配的IP，然后是其他IP
+                const otherIPs = customPreferredIPs.filter(ip => {
+                    const nodeRegion = extractRegionFromNodeName(ip.isp);
+                    return !nodeRegion || !priorityRegions.includes(nodeRegion);
+                });
+                
+                await addNodesFromList([...sortedIPs, ...otherIPs]);
+            } else {
+                await addNodesFromList(customPreferredIPs);
+            }
         }
         
         if (customPreferredDomains.length > 0 && epd) {
@@ -2114,7 +2184,7 @@ async function handleSubscriptionPage(request, user = null) {
                 regionNames: {
                     US: '🇺🇸 美国', SG: '🇸🇬 新加坡', JP: '🇯🇵 日本', HK: '🇭🇰 香港',
                     KR: '🇰🇷 韩国', DE: '🇩🇪 德国', SE: '🇸🇪 瑞典', NL: '🇳🇱 荷兰',
-                    FI: '🇫🇮 芬兰', GB: '🇬🇧 英国'
+                    FI: '🇫🇮 芬兰', GB: '🇬🇧 英国', TW: '🇹🇼 台湾'
                 },
                 terminal: '终端 v2.6',
                 githubProject: 'GitHub 项目',
@@ -2375,6 +2445,7 @@ async function handleSubscriptionPage(request, user = null) {
                                 <option value="JP">${t.regionNames.JP}</option>
                                 <option value="HK">${t.regionNames.HK}</option>
                                 <option value="KR">${t.regionNames.KR}</option>
+                                <option value="TW">${t.regionNames.TW}</option>
                                 <option value="DE">${t.regionNames.DE}</option>
                                 <option value="SE">${t.regionNames.SE}</option>
                                 <option value="NL">${t.regionNames.NL}</option>
@@ -2444,7 +2515,7 @@ async function handleSubscriptionPage(request, user = null) {
                     </div>
                     <div style="margin-bottom: 15px;">
                             <label style="display: block; margin-bottom: 8px; color: #ffffff; font-weight: bold; text-shadow: none; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision;">${t.preferredIPs}</label>
-                            <input type="text" id="preferredIPs" placeholder="例如: 1.2.3.4:443#香港节点,5.6.7.8:80#美国节点,example.com:8443#新加坡节点" style="width: 100%; padding: 12px; background: rgba(0, 0, 0, 0.6); border: 1px solid #ffffff; border-radius: 8px; color: #ffffff; font-weight: bold; font-family: 'Courier New', monospace; font-size: 14px; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; backdrop-filter: blur(10px);">
+                            <input type="text" id="preferredIPs" placeholder="例如: 1.2.3.4:443#香港节点,5.6.7.8:80#美国节点,example.com:8443#新加坡节点,1.1.1.1:443#台湾节点" style="width: 100%; padding: 12px; background: rgba(0, 0, 0, 0.6); border: 1px solid #ffffff; border-radius: 8px; color: #ffffff; font-weight: bold; font-family: 'Courier New', monospace; font-size: 14px; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; backdrop-filter: blur(10px);">
                             <small style="color: #ffffff; font-weight: bold; font-size: 0.85rem; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; text-shadow: none; opacity: 1;">格式: IP:端口#节点名称 或 IP:端口 (无#则使用默认名称)。支持多个，用逗号分隔。<span style="color: #ffffff; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; text-shadow: none; opacity: 1;">API添加的IP会自动显示在这里。</span></small>
                     </div>
                     <div style="margin-bottom: 15px;">
@@ -2833,7 +2904,7 @@ async function handleSubscriptionPage(request, user = null) {
                             regionNames: {
                     'US': '🇺🇸 美国', 'SG': '🇸🇬 新加坡', 'JP': '🇯🇵 日本', 'HK': '🇭🇰 香港',
                     'KR': '🇰🇷 韩国', 'DE': '🇩🇪 德国', 'SE': '🇸🇪 瑞典', 'NL': '🇳🇱 荷兰',
-                    'FI': '🇫🇮 芬兰', 'GB': '🇬🇧 英国'
+                    'FI': '🇫🇮 芬兰', 'GB': '🇬🇧 英国', 'TW': '🇹🇼 台湾'
                             },
                             customIPMode: '自定义ProxyIP模式 (p变量启用)',
                             customIPModeDesc: '自定义IP模式 (已禁用地区匹配)',
@@ -4070,10 +4141,16 @@ async function fetchAndParseNewIPs() {
         const results = [];
         const lines = text.trim().replace(/\r/g, "").split('\n');
         const regex = /^([^:]+):(\d+)#(.*)$/;
+        // IPv4 正则表达式
+        const ipv4Regex = /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/;
+        // IPv6 正则表达式（简化版，匹配基本IPv6格式）
+        const ipv6Regex = /^([0-9a-fA-F:]+)$/;
 
         for (const line of lines) {
             const trimmedLine = line.trim();
             if (!trimmedLine) continue;
+            
+            // 首先尝试匹配原有格式：IP:端口#名称
             const match = trimmedLine.match(regex);
             if (match) {
                 results.push({
@@ -4081,6 +4158,24 @@ async function fetchAndParseNewIPs() {
                     port: parseInt(match[2], 10),
                     name: match[3].trim() || match[1]
                 });
+            } else {
+                // 如果不是原有格式，尝试匹配纯IP地址
+                // 检查是否为IPv4
+                if (ipv4Regex.test(trimmedLine)) {
+                    results.push({
+                        ip: trimmedLine,
+                        port: 443,
+                        name: trimmedLine
+                    });
+                } 
+                // 检查是否为IPv6（简化匹配）
+                else if (ipv6Regex.test(trimmedLine) && trimmedLine.includes(':')) {
+                    results.push({
+                        ip: trimmedLine,
+                        port: 443,
+                        name: trimmedLine
+                    });
+                }
             }
         }
         return results;
@@ -4434,11 +4529,27 @@ async function handleConfigAPI(request) {
                 directDomains.length = 0;
                 customPreferredIPs = [];
                 customPreferredDomains = [];
+                // 从自定义URL获取IP并填充到customPreferredIPs
+                if (newConfig.yxURL !== undefined) {
+                    try {
+                        const urlIPs = await fetchAndParseNewIPs();
+                        if (urlIPs.length > 0) {
+                            customPreferredIPs = urlIPs.map(item => ({
+                                ip: item.ip,
+                                port: item.port || 443,
+                                isp: item.name || item.ip
+                            }));
+                        }
+                    } catch (error) {
+                        // 如果获取失败，保持customPreferredIPs为空
+                    }
+                }
             } else {
                 backupIPs = [
                     { domain: 'ProxyIP.US.CMLiussss.net', region: 'US', regionCode: 'US', port: 443 },
                     { domain: 'ProxyIP.SG.CMLiussss.net', region: 'SG', regionCode: 'SG', port: 443 },
                     { domain: 'ProxyIP.JP.CMLiussss.net', region: 'JP', regionCode: 'JP', port: 443 },
+                    { domain: 'ProxyIP.TW.CMLiussss.net', region: 'TW', regionCode: 'TW', port: 443 },
                     { domain: 'ProxyIP.HK.CMLiussss.net', region: 'HK', regionCode: 'HK', port: 443 },
                     { domain: 'ProxyIP.KR.CMLiussss.net', region: 'KR', regionCode: 'KR', port: 443 },
                     { domain: 'ProxyIP.DE.CMLiussss.net', region: 'DE', regionCode: 'DE', port: 443 },
