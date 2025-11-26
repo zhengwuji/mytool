@@ -100,9 +100,97 @@ const E_SOCKS_CONN_FAIL = atob('ZmFpbCB0byBvcGVuIHNvY2tzIGNvbm5lY3Rpb24=');
 let parsedSocks5Config = {};
 let isSocksEnabled = false;
 
+// 生成唯一的实例ID，使每个worker实例都有独特标识
+const WORKER_INSTANCE_ID = `${Date.now()}-${Math.random().toString(36).substring(2, 15)}-${Math.floor(Math.random() * 1000000)}`;
+const WORKER_FINGERPRINT = btoa(WORKER_INSTANCE_ID).substring(0, 32);
+
 const ADDRESS_TYPE_IPV4 = 1;
 const ADDRESS_TYPE_URL = 2;
 const ADDRESS_TYPE_IPV6 = 3;
+
+// 生成随机化的 User-Agent，使每个实例看起来独特
+function generateRandomUserAgent() {
+    const osVersions = [
+        { os: 'Windows NT 10.0', version: '10.0' },
+        { os: 'Windows NT 11.0', version: '11.0' },
+        { os: 'Macintosh; Intel Mac OS X 10_15_7', version: '10_15_7' },
+        { os: 'Macintosh; Intel Mac OS X 12_6', version: '12_6' },
+        { os: 'X11; Linux x86_64', version: '5.15' },
+        { os: 'X11; Ubuntu; Linux x86_64', version: '22.04' }
+    ];
+    
+    const browsers = [
+        { name: 'Chrome', versions: ['120', '121', '122', '123', '124'] },
+        { name: 'Firefox', versions: ['121', '122', '123', '124', '125'] },
+        { name: 'Safari', versions: ['17.0', '17.1', '17.2', '17.3'] },
+        { name: 'Edge', versions: ['120', '121', '122', '123'] }
+    ];
+    
+    const webkitVersions = ['537.36', '605.1.15', '537.36'];
+    const chromeVersions = ['120.0.0.0', '121.0.0.0', '122.0.0.0', '123.0.0.0', '124.0.0.0'];
+    
+    const randomOS = osVersions[Math.floor(Math.random() * osVersions.length)];
+    const randomBrowser = browsers[Math.floor(Math.random() * browsers.length)];
+    const randomWebKit = webkitVersions[Math.floor(Math.random() * webkitVersions.length)];
+    const randomChrome = chromeVersions[Math.floor(Math.random() * chromeVersions.length)];
+    const randomBuild = Math.floor(Math.random() * 1000000) + 100000;
+    
+    if (randomBrowser.name === 'Chrome') {
+        return `Mozilla/5.0 (${randomOS.os}; Win64; x64) AppleWebKit/${randomWebKit} (KHTML, like Gecko) Chrome/${randomChrome} Safari/${randomWebKit}`;
+    } else if (randomBrowser.name === 'Firefox') {
+        const firefoxVersion = randomBrowser.versions[Math.floor(Math.random() * randomBrowser.versions.length)];
+        return `Mozilla/5.0 (${randomOS.os}; rv:${firefoxVersion}.0) Gecko/20100101 Firefox/${firefoxVersion}.0`;
+    } else if (randomBrowser.name === 'Safari') {
+        const safariVersion = randomBrowser.versions[Math.floor(Math.random() * randomBrowser.versions.length)];
+        return `Mozilla/5.0 (${randomOS.os}) AppleWebKit/${randomWebKit} (KHTML, like Gecko) Version/${safariVersion} Safari/${randomWebKit}`;
+    } else {
+        return `Mozilla/5.0 (${randomOS.os}; Win64; x64) AppleWebKit/${randomWebKit} (KHTML, like Gecko) Chrome/${randomChrome} Safari/${randomWebKit} Edg/${randomChrome}`;
+    }
+}
+
+// 生成随机化的检查器 User-Agent
+function generateCheckerUserAgent() {
+    const prefixes = ['Mozilla/5.0', 'CF-IP-Checker', 'Cloudflare-Validator'];
+    const versions = ['1.0', '1.1', '2.0', '2.1'];
+    const randomPrefix = prefixes[Math.floor(Math.random() * prefixes.length)];
+    const randomVersion = versions[Math.floor(Math.random() * versions.length)];
+    const randomId = Math.random().toString(36).substring(2, 8);
+    return `${randomPrefix}/${randomVersion} (${randomId})`;
+}
+
+// 生成随机化的 Go 客户端 User-Agent
+function generateGoClientUserAgent() {
+    const versions = ['1.0', '1.1', '2.0', '2.1'];
+    const randomVersion = versions[Math.floor(Math.random() * versions.length)];
+    const randomId = Math.random().toString(36).substring(2, 6);
+    return `Go-http-client/${randomVersion}-${randomId}`;
+}
+
+// 生成随机化的请求头，增加唯一性
+function generateRandomHeaders(baseHeaders = {}) {
+    const randomId = Math.random().toString(36).substring(2, 15);
+    const randomNum = Math.floor(Math.random() * 1000000);
+    const timestamp = Date.now();
+    
+    const randomHeaders = {
+        ...baseHeaders,
+        'X-Request-ID': `${randomId}-${randomNum}-${timestamp}`,
+        'X-Client-Version': `${Math.floor(Math.random() * 10) + 1}.${Math.floor(Math.random() * 10)}.${Math.floor(Math.random() * 100)}`,
+        'X-Instance-ID': WORKER_INSTANCE_ID,
+        'X-Fingerprint': WORKER_FINGERPRINT,
+    };
+    
+    // 随机添加一些可选的请求头
+    if (Math.random() > 0.5) {
+        randomHeaders['X-Forwarded-For'] = `${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`;
+    }
+    
+    // 随机添加 Accept-Encoding
+    const encodings = ['gzip, deflate, br', 'gzip, deflate', 'br', 'gzip'];
+    randomHeaders['Accept-Encoding'] = encodings[Math.floor(Math.random() * encodings.length)];
+    
+    return randomHeaders;
+}
 
 function isValidFormat(str) {
     const userRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -166,6 +254,69 @@ async function saveKVConfig() {
     }
 }
 
+async function getKVUsage() {
+    if (!kvStore) {
+        return {
+            totalSize: 0,
+            keyCount: 0,
+            keys: []
+        };
+    }
+    
+    try {
+        let totalSize = 0;
+        let keyCount = 0;
+        const keys = [];
+        let cursor = null;
+        
+        do {
+            const listResult = await kvStore.list({ cursor });
+            cursor = listResult.cursor;
+            
+            for (const keyInfo of listResult.keys) {
+                keyCount++;
+                try {
+                    const value = await kvStore.get(keyInfo.name);
+                    if (value !== null) {
+                        const size = new TextEncoder().encode(value).length;
+                        totalSize += size;
+                        keys.push({
+                            name: keyInfo.name,
+                            size: size,
+                            sizeFormatted: formatBytes(size)
+                        });
+                    }
+                } catch (error) {
+                    // 如果获取值失败，跳过这个键
+                }
+            }
+        } while (cursor);
+        
+        return {
+            totalSize: totalSize,
+            totalSizeFormatted: formatBytes(totalSize),
+            keyCount: keyCount,
+            keys: keys
+        };
+    } catch (error) {
+        return {
+            totalSize: 0,
+            totalSizeFormatted: '0 B',
+            keyCount: 0,
+            keys: [],
+            error: error.message
+        };
+    }
+}
+
+function formatBytes(bytes) {
+    if (bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + ' ' + sizes[i];
+}
+
 function getConfigValue(key, defaultValue = '') {
     
     if (kvConfig[key] !== undefined) {
@@ -212,9 +363,9 @@ async function checkIPAvailability(domain, port = 443, timeout = 2000) {
         const response = await fetch(`https://${domain}`, {
             method: 'HEAD',
             signal: controller.signal,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (compatible; CF-IP-Checker/1.0)'
-            }
+            headers: generateRandomHeaders({
+                'User-Agent': generateCheckerUserAgent()
+            })
         });
         
         clearTimeout(timeoutId);
@@ -607,6 +758,42 @@ export default {
                     headers: { 'Content-Type': 'application/json' }
                 });
             }
+            
+            if (url.pathname.includes('/api/subscription-stats')) {
+                const pathParts = url.pathname.split('/').filter(p => p);
+            
+                const apiIndex = pathParts.indexOf('api');
+                if (apiIndex > 0) {
+                    const pathSegments = pathParts.slice(0, apiIndex);
+                    const pathIdentifier = pathSegments.join('/');
+                    
+                    let isValid = false;
+                    if (cp && cp.trim()) {
+                        const cleanCustomPath = cp.trim().startsWith('/') ? cp.trim().substring(1) : cp.trim();
+                        isValid = (pathIdentifier === cleanCustomPath);
+                    } else {
+                        isValid = (isValidFormat(pathIdentifier) && pathIdentifier === at);
+                    }
+                    
+                    if (isValid) {
+                        const stats = await getSubscriptionStats();
+                        return new Response(JSON.stringify(stats), { 
+                            status: 200,
+                            headers: { 'Content-Type': 'application/json' }
+                        });
+                    } else {
+                        return new Response(JSON.stringify({ error: '路径验证失败' }), { 
+                            status: 403,
+                            headers: { 'Content-Type': 'application/json' }
+                        });
+                    }
+                }
+            
+                return new Response(JSON.stringify({ error: '无效的API路径' }), { 
+                    status: 404,
+                    headers: { 'Content-Type': 'application/json' }
+                });
+            }
         
         if (request.method === 'POST' && ex) {
             const r = await handleXhttpPost(request);
@@ -617,7 +804,7 @@ export default {
                         'X-Accel-Buffering': 'no',
                         'Cache-Control': 'no-store',
                         Connection: 'keep-alive',
-                        'User-Agent': 'Go-http-client/2.0',
+                        'User-Agent': generateGoClientUserAgent(),
                         'Content-Type': 'application/grpc',
                     },
                 });
@@ -746,10 +933,10 @@ export default {
                         if (customBgUrl && customBgUrl.trim()) {
                             try {
                                 const imageResponse = await fetch(customBgUrl.trim(), {
-                                    headers: {
-                                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                                    headers: generateRandomHeaders({
+                                        'User-Agent': generateRandomUserAgent(),
                                         'Accept': 'image/*',
-                                    },
+                                    }),
                                     redirect: 'follow'
                                 });
                                 
@@ -789,10 +976,10 @@ export default {
                             // 回退到外部URL（如果 base64 未设置）
                             const imageUrl = 'http://rn.firegod.eu.org:40072/directlink/1/【哲风壁纸】户外-活力少女-清新.png';
                             const imageResponse = await fetch(imageUrl, {
-                                headers: {
-                                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                                headers: generateRandomHeaders({
+                                    'User-Agent': generateRandomUserAgent(),
                                     'Accept': 'image/*',
-                                },
+                                }),
                                 redirect: 'follow'
                             });
                             
@@ -822,11 +1009,11 @@ export default {
                             // 从自定义URL获取内容
                             const homepageResponse = await fetch(customHomepage.trim(), {
                                 method: 'GET',
-                                headers: {
-                                    'User-Agent': request.headers.get('User-Agent') || 'Mozilla/5.0',
+                                headers: generateRandomHeaders({
+                                    'User-Agent': request.headers.get('User-Agent') || generateRandomUserAgent(),
                                     'Accept': request.headers.get('Accept') || '*/*',
                                     'Accept-Language': request.headers.get('Accept-Language') || 'en-US,en;q=0.9',
-                                },
+                                }),
                                 redirect: 'follow'
                             });
                             
@@ -1346,6 +1533,221 @@ function generateQuantumultConfig(links) {
     return btoa(links.join('\n'));
 }
 
+// 识别客户端类型
+function detectClientType(userAgent, target) {
+    if (!userAgent) userAgent = '';
+    const ua = userAgent.toLowerCase();
+    
+    // 根据target参数判断
+    if (target) {
+        const targetLower = target.toLowerCase();
+        if (targetLower === atob('Y2xhc2g=') || targetLower === atob('Y2xhc2hy')) {
+            if (ua.includes('stash')) return 'STASH';
+            return 'CLASH';
+        }
+        if (targetLower === atob('c3VyZ2U=') || targetLower === atob('c3VyZ2Uy') || targetLower === atob('c3VyZ2Uz') || targetLower === atob('c3VyZ2U0')) {
+            return 'SURGE';
+        }
+        if (targetLower === atob('cXVhbnR1bXVsdA==') || targetLower === atob('cXVhbng=') || targetLower === 'quanx') {
+            return 'QUANTUMULT X';
+        }
+        if (targetLower === atob('djJyYXk=')) {
+            if (ua.includes('nekoray')) return 'NEKORAY';
+            if (ua.includes('v2rayng')) return 'V2RAYNG';
+            if (ua.includes('shadowrocket')) return 'Shadowrocket';
+            return 'V2RAY';
+        }
+        if (targetLower === atob('bG9vbg==')) {
+            return 'LOON';
+        }
+        if (targetLower === atob('c2luZ2JveA==')) {
+            return 'SING-BOX';
+        }
+    }
+    
+    // 根据User-Agent判断
+    if (ua.includes('clash')) return 'CLASH';
+    if (ua.includes('stash')) return 'STASH';
+    if (ua.includes('surge')) return 'SURGE';
+    if (ua.includes('quantumult')) return 'QUANTUMULT X';
+    if (ua.includes('v2rayng')) return 'V2RAYNG';
+    if (ua.includes('nekoray')) return 'NEKORAY';
+    if (ua.includes('shadowrocket')) return 'Shadowrocket';
+    if (ua.includes('v2ray')) return 'V2RAY';
+    if (ua.includes('loon')) return 'LOON';
+    if (ua.includes('sing-box')) return 'SING-BOX';
+    
+    return '未知客户端';
+}
+
+// 记录订阅使用信息
+async function recordSubscriptionUsage(request, target) {
+    if (!kvStore) return;
+    
+    try {
+        const clientIP = request.headers.get('CF-Connecting-IP') || 
+                       request.cf?.clientIp || 
+                       '未知IP';
+        const userAgent = request.headers.get('User-Agent') || '未知';
+        const clientType = detectClientType(userAgent, target);
+        const timestamp = Date.now();
+        
+        // 获取现有统计数据
+        let statsData = {};
+        try {
+            const statsStr = await kvStore.get('subscription_stats');
+            if (statsStr) {
+                statsData = JSON.parse(statsStr);
+            }
+        } catch (error) {
+            statsData = {};
+        }
+        
+        // 使用唯一ID作为key，确保每个IP+客户端类型组合都有独立记录
+        // 格式：IP_客户端类型_时间戳（用于区分同一IP同一客户端的不同访问）
+        // 但为了节省空间，我们仍然使用 IP_客户端类型 作为key，只更新最后访问时间
+        const clientKey = `${clientIP}_${clientType}`;
+        const clientRecord = {
+            ip: clientIP,
+            client: clientType,
+            lastAccess: timestamp,
+            userAgent: userAgent.length > 100 ? userAgent.substring(0, 100) : userAgent,
+            firstAccess: statsData[clientKey]?.firstAccess || timestamp // 保留首次访问时间
+        };
+        
+        statsData[clientKey] = clientRecord;
+        
+        // 清理超过7天的旧记录
+        const sevenDaysAgo = timestamp - 7 * 24 * 60 * 60 * 1000;
+        for (const key in statsData) {
+            if (statsData[key].lastAccess < sevenDaysAgo) {
+                delete statsData[key];
+            }
+        }
+        
+        // 检查数据大小，如果超过10MB则按日期清理旧记录
+        const maxSizeBytes = 10 * 1024 * 1024; // 10MB = 10 * 1024 * 1024 字节
+        let dataString = JSON.stringify(statsData);
+        
+        // 如果数据超过10MB，按日期从旧到新清理
+        if (dataString.length > maxSizeBytes) {
+            // 将记录转换为数组并按最后访问时间排序（旧的在前）
+            const recordsArray = [];
+            for (const key in statsData) {
+                if (statsData[key] && statsData[key].lastAccess) {
+                    recordsArray.push({
+                        key: key,
+                        record: statsData[key],
+                        lastAccess: statsData[key].lastAccess
+                    });
+                }
+            }
+            
+            // 按最后访问时间从旧到新排序（最早的在前）
+            recordsArray.sort((a, b) => a.lastAccess - b.lastAccess);
+            
+            // 从最旧的记录开始删除，直到数据大小小于10MB
+            let tempStatsData = { ...statsData };
+            for (let i = 0; i < recordsArray.length; i++) {
+                delete tempStatsData[recordsArray[i].key];
+                
+                // 重新计算数据大小
+                dataString = JSON.stringify(tempStatsData);
+                if (dataString.length <= maxSizeBytes) {
+                    // 找到合适的数量，更新原始数据
+                    statsData = tempStatsData;
+                    break;
+                }
+            }
+            
+            // 如果删除所有旧记录后仍然超过限制，保留最新的记录
+            if (dataString.length > maxSizeBytes) {
+                // 按最后访问时间从新到旧排序（最新的在前）
+                recordsArray.sort((a, b) => b.lastAccess - a.lastAccess);
+                
+                // 清空数据，只保留最新的记录
+                statsData = {};
+                for (let i = 0; i < recordsArray.length; i++) {
+                    const testData = { ...statsData };
+                    testData[recordsArray[i].key] = recordsArray[i].record;
+                    const testString = JSON.stringify(testData);
+                    
+                    if (testString.length <= maxSizeBytes) {
+                        statsData[recordsArray[i].key] = recordsArray[i].record;
+                    } else {
+                        // 超过限制，停止添加
+                        break;
+                    }
+                }
+            }
+        }
+        
+        // 保存统计数据
+        await kvStore.put('subscription_stats', JSON.stringify(statsData));
+    } catch (error) {
+        // 静默失败，不影响订阅功能
+    }
+}
+
+// 获取订阅使用统计
+async function getSubscriptionStats() {
+    if (!kvStore) {
+        return {
+            totalUsers: 0,
+            clients: [],
+            error: 'KV存储未启用'
+        };
+    }
+    
+    try {
+        const statsStr = await kvStore.get('subscription_stats');
+        if (!statsStr) {
+            return {
+                totalUsers: 0,
+                clients: []
+            };
+        }
+        
+        const statsData = JSON.parse(statsStr);
+        const now = Date.now();
+        const onlineThreshold = 5 * 60 * 1000; // 5分钟内访问视为在线
+        
+        // 将统计数据转换为数组，确保所有记录都被包含
+        const clients = [];
+        for (const key in statsData) {
+            const client = statsData[key];
+            if (client && client.ip && client.lastAccess) {
+                clients.push({
+                    ip: client.ip,
+                    client: client.client || '未知客户端',
+                    lastAccess: client.lastAccess,
+                    isOnline: (now - client.lastAccess) < onlineThreshold,
+                    userAgent: client.userAgent || '',
+                    firstAccess: client.firstAccess || client.lastAccess
+                });
+            }
+        }
+        
+        // 按最后访问时间排序（最新的在前）
+        clients.sort((a, b) => b.lastAccess - a.lastAccess);
+        
+        // 计算唯一IP数量（不同IP的使用者数量）
+        const uniqueIPs = new Set(clients.map(c => c.ip));
+        
+        return {
+            totalUsers: clients.length, // 总记录数（IP+客户端类型组合）
+            uniqueIPCount: uniqueIPs.size, // 唯一IP数量
+            clients: clients
+        };
+    } catch (error) {
+        return {
+            totalUsers: 0,
+            clients: [],
+            error: error.message
+        };
+    }
+}
+
 async function handleSubscriptionRequest(request, user, url = null) {
     if (!url) url = new URL(request.url);
     
@@ -1543,6 +1945,13 @@ async function handleSubscriptionRequest(request, user, url = null) {
         finalLinks.push(errorLink);
     }
 
+    // 记录订阅使用信息
+    try {
+        await recordSubscriptionUsage(request, target);
+    } catch (error) {
+        // 记录失败不影响订阅功能
+    }
+    
     let subscriptionContent;
     let contentType = 'text/plain; charset=utf-8';
     
@@ -1783,7 +2192,7 @@ async function fetchDynamicIPs() {
 
 async function fetchAndParseWetest(url) {
     try {
-        const response = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+        const response = await fetch(url, { headers: generateRandomHeaders({ 'User-Agent': generateRandomUserAgent() }) });
         if (!response.ok) {
             return [];
         }
@@ -2200,6 +2609,7 @@ async function handleSubscriptionPage(request, user = null) {
                 customBackgroundImage: '自定义背景图片链接:',
                 customBackgroundImagePlaceholder: '例如: https://example.com/image.jpg',
                 customBackgroundImageHint: '设置自定义背景图片URL。留空则使用默认背景图片。',
+                changeBeautyBackground: '一键更换图片背景',
                 saveConfig: '保存配置',
                 advancedControl: '高级控制',
                 subscriptionConverter: '订阅转换地址:',
@@ -2246,7 +2656,6 @@ async function handleSubscriptionPage(request, user = null) {
                     KR: '🇰🇷 韩国', DE: '🇩🇪 德国', SE: '🇸🇪 瑞典', NL: '🇳🇱 荷兰',
                     FI: '🇫🇮 芬兰', GB: '🇬🇧 英国', TW: '🇹🇼 台湾'
                 },
-                terminal: '终端 v2.6',
                 githubProject: 'GitHub 项目',
                 autoDetectClient: '自动识别',
             selectionLogicText: '同地区 → 邻近地区 → 其他地区',
@@ -2442,8 +2851,39 @@ async function handleSubscriptionPage(request, user = null) {
             -moz-osx-font-smoothing: auto;
             text-rendering: geometricPrecision;
         }
+        .checkbox-container {
+            position: fixed; top: 20px; right: 20px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #ffffff;
+            font-family: "Consolas", "Monaco", "Courier New", monospace;
+            font-size: 0.8rem;
+        }
+        .checkbox-container input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+            accent-color: #4ade80;
+        }
+        .checkbox-container label {
+            cursor: pointer;
+            user-select: none;
+        }
+        .hide-content > *:not(.checkbox-container) {
+            display: none !important;
+        }
+        .hide-content .checkbox-container {
+            display: flex !important;
+            z-index: 9999;
+        }
         @media (max-width: 768px) {
             .matrix-text {
+                top: 10px;
+                right: 10px;
+                font-size: 0.7rem;
+            }
+            .checkbox-container {
                 top: 10px;
                 right: 10px;
                 font-size: 0.7rem;
@@ -2455,7 +2895,10 @@ async function handleSubscriptionPage(request, user = null) {
     </style>
 </head>
 <body>
-        <div class="matrix-text">${t.terminal}</div>
+        <div class="checkbox-container">
+            <input type="checkbox" id="terminalCheckbox">
+            <label for="terminalCheckbox">背景</label>
+        </div>
     <div class="container">
         <div class="header">
                 <h1 class="title">${t.title}</h1>
@@ -2478,6 +2921,24 @@ async function handleSubscriptionPage(request, user = null) {
             <div class=atob('c3Vic2NyaXB0aW9uLXVybA==') id="clientSubscriptionUrl"></div>
         </div>
         <div class="card">
+                <h2 class="card-title">订阅使用统计</h2>
+            <div id="subscriptionStats" style="margin: 20px 0; padding: 15px; background: rgba(0, 0, 0, 0.6); border: 1px solid #ffffff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3); position: relative; overflow: hidden; backdrop-filter: blur(10px);">
+                    <div style="color: #ffffff; font-weight: bold; margin-bottom: 15px; text-shadow: none; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; opacity: 1;">[ 加载中... ]</div>
+                    <div id="statsContent" style="color: #ffffff; font-weight: bold; font-family: 'Courier New', monospace; text-shadow: none; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision;">
+                        <div style="margin-bottom: 15px; font-size: 1.1rem; padding-bottom: 10px; border-bottom: 1px solid rgba(255, 255, 255, 0.3);">
+                            📊 总使用记录: <span id="totalUsers" style="color: #4ade80; font-weight: bold;">0</span>
+                        </div>
+                        <div id="clientsList" style="margin-top: 15px;">
+                            <div style="margin-bottom: 12px; font-weight: bold; font-size: 1rem; color: #ffffff;">客户端列表:</div>
+                            <select id="clientsSelect" style="width: 100%; padding: 12px; background: rgba(0, 0, 0, 0.6); border: 1px solid #ffffff; border-radius: 8px; color: #ffffff; font-weight: bold; font-family: 'Courier New', monospace; font-size: 14px; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; backdrop-filter: blur(10px); margin-bottom: 15px; cursor: pointer;">
+                                <option value="">-- 请选择客户端查看详情 --</option>
+                            </select>
+                            <div id="clientDetails" style="display: none; padding: 15px; background: rgba(0, 0, 0, 0.4); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 6px; margin-top: 10px;"></div>
+                        </div>
+                    </div>
+            </div>
+        </div>
+        <div class="card">
                 <h2 class="card-title">${t.systemStatus}</h2>
             <div id="systemStatus" style="margin: 20px 0; padding: 15px; background: rgba(0, 0, 0, 0.6); border: 1px solid #ffffff; border-radius: 12px; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3); position: relative; overflow: hidden; backdrop-filter: blur(10px);">
                     <div style="color: #ffffff; font-weight: bold; margin-bottom: 15px; text-shadow: none; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; opacity: 1;">[ ${t.checking} ]</div>
@@ -2493,6 +2954,10 @@ async function handleSubscriptionPage(request, user = null) {
                 <h2 class="card-title">${t.configManagement}</h2>
             <div id="kvStatus" style="margin-bottom: 20px; padding: 10px; background: rgba(0, 0, 0, 0.6); border: 1px solid #ffffff; border-radius: 8px; color: #ffffff; font-weight: bold; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; text-shadow: none; opacity: 1; backdrop-filter: blur(10px);">
                     ${t.kvStatusChecking}
+            </div>
+            <div id="kvUsage" style="margin-bottom: 20px; padding: 10px; background: rgba(0, 0, 0, 0.6); border: 1px solid #ffffff; border-radius: 8px; color: #ffffff; font-weight: bold; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; text-shadow: none; opacity: 1; backdrop-filter: blur(10px); display: none;">
+                    <div style="margin-bottom: 8px;">📊 KV存储占用空间</div>
+                    <div id="kvUsageInfo" style="font-size: 0.9rem; color: #ffffff; font-weight: normal;"></div>
             </div>
             <div id="configContent" style="display: none;">
                 <form id="regionForm" style="margin-bottom: 20px;">
@@ -2560,8 +3025,11 @@ async function handleSubscriptionPage(request, user = null) {
                     </div>
                     <div style="margin-bottom: 15px;">
                             <label style="display: block; margin-bottom: 8px; color: #ffffff; font-weight: bold; text-shadow: none; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision;">${t.customBackgroundImage}</label>
-                            <input type="text" id="customBackgroundImage" placeholder="${t.customBackgroundImagePlaceholder}" style="width: 100%; padding: 12px; background: rgba(0, 0, 0, 0.6); border: 1px solid #ffffff; border-radius: 8px; color: #ffffff; font-weight: bold; font-family: 'Courier New', monospace; font-size: 14px; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; backdrop-filter: blur(10px);">
-                            <small style="color: #ffffff; font-weight: bold; font-size: 0.85rem; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; text-shadow: none; opacity: 1;">${t.customBackgroundImageHint}</small>
+                            <div style="display: flex; gap: 10px; align-items: flex-start;">
+                                <input type="text" id="customBackgroundImage" placeholder="${t.customBackgroundImagePlaceholder}" style="flex: 1; padding: 12px; background: rgba(0, 0, 0, 0.6); border: 1px solid #ffffff; border-radius: 8px; color: #ffffff; font-weight: bold; font-family: 'Courier New', monospace; font-size: 14px; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; backdrop-filter: blur(10px);">
+                                <button type="button" id="changeBeautyBackgroundBtn" style="padding: 12px 20px; background: rgba(255, 105, 180, 0.8); border: 1px solid #ff69b4; border-radius: 8px; color: #ffffff; font-weight: bold; font-family: 'Courier New', monospace; font-size: 14px; cursor: pointer; white-space: nowrap; transition: all 0.3s ease; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; backdrop-filter: blur(10px); box-shadow: 0 2px 10px rgba(255, 105, 180, 0.3);">${t.changeBeautyBackground}</button>
+                            </div>
+                            <small style="color: #ffffff; font-weight: bold; font-size: 0.85rem; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; text-shadow: none; opacity: 1; display: block; margin-top: 8px;">${t.customBackgroundImageHint}</small>
                     </div>
                     <div style="margin-bottom: 15px;">
                             <label style="display: block; margin-bottom: 8px; color: #ffffff; font-weight: bold; text-shadow: none; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision;">${t.customPath}</label>
@@ -2732,6 +3200,20 @@ async function handleSubscriptionPage(request, user = null) {
                 subscriptionCopied: '订阅链接已复制',
                 autoSubscriptionCopied: '自动识别订阅链接已复制，客户端访问时会根据User-Agent自动识别并返回对应格式'
             };
+        
+        // 复选框显示/隐藏内容功能
+        document.addEventListener('DOMContentLoaded', function() {
+            var checkbox = document.getElementById('terminalCheckbox');
+            if (checkbox) {
+                checkbox.addEventListener('change', function() {
+                    if (this.checked) {
+                        document.body.classList.add('hide-content');
+                    } else {
+                        document.body.classList.remove('hide-content');
+                    }
+                });
+            }
+        });
         
         function tryOpenApp(schemeUrl, fallbackCallback, timeout) {
             timeout = timeout || 2500;
@@ -2938,6 +3420,137 @@ async function handleSubscriptionPage(request, user = null) {
             }, 100);
         }
         
+        // 获取订阅使用统计
+        async function loadSubscriptionStats() {
+            try {
+                const statsElement = document.getElementById('subscriptionStats');
+                const statsContent = document.getElementById('statsContent');
+                const totalUsersElement = document.getElementById('totalUsers');
+                
+                if (!statsElement || !statsContent) return;
+                
+                const apiUrl = window.location.pathname + '/api/subscription-stats';
+                const response = await fetch(apiUrl);
+                const data = await response.json();
+                
+                if (data.error) {
+                    statsContent.innerHTML = '<div style="color: #ff6b6b;">⚠️ ' + data.error + '</div>';
+                    return;
+                }
+                
+                // 更新总人数
+                if (totalUsersElement) {
+                    const totalText = data.uniqueIPCount !== undefined 
+                        ? data.totalUsers + ' (唯一IP: ' + data.uniqueIPCount + ')'
+                        : data.totalUsers || 0;
+                    totalUsersElement.textContent = totalText;
+                }
+                
+                // 显示客户端列表（下拉选择器）
+                const clientsSelect = document.getElementById('clientsSelect');
+                const clientDetails = document.getElementById('clientDetails');
+                
+                if (clientsSelect) {
+                    // 移除旧的事件监听器（如果存在）
+                    const newSelect = clientsSelect.cloneNode(true);
+                    clientsSelect.parentNode.replaceChild(newSelect, clientsSelect);
+                    const freshSelect = document.getElementById('clientsSelect');
+                    
+                    // 清空现有选项
+                    freshSelect.innerHTML = '<option value="">-- 请选择客户端查看详情 --</option>';
+                    
+                    if (!data.clients || data.clients.length === 0) {
+                        freshSelect.innerHTML += '<option value="" disabled>暂无客户端使用记录</option>';
+                    } else {
+                        // 为每个客户端创建下拉选项
+                        data.clients.forEach((client, index) => {
+                            const timeAgo = getTimeAgo(client.lastAccess);
+                            const statusText = client.isOnline ? '● 在线' : '○ 离线';
+                            const optionText = (client.client || '未知客户端') + ' | ' + (client.ip || '未知') + ' | ' + statusText + ' | ' + timeAgo;
+                            
+                            const option = document.createElement('option');
+                            option.value = index;
+                            option.textContent = optionText;
+                            option.setAttribute('data-client', JSON.stringify(client));
+                            freshSelect.appendChild(option);
+                        });
+                        
+                        // 添加选择事件监听
+                        freshSelect.addEventListener('change', function() {
+                            const selectedIndex = this.value;
+                            if (selectedIndex === '' || selectedIndex === null) {
+                                if (clientDetails) clientDetails.style.display = 'none';
+                                return;
+                            }
+                            
+                            const selectedOption = this.options[this.selectedIndex];
+                            if (!selectedOption || !selectedOption.getAttribute('data-client')) return;
+                            
+                            const clientData = JSON.parse(selectedOption.getAttribute('data-client'));
+                            
+                            // 显示选中客户端的详细信息
+                            const timeAgo = getTimeAgo(clientData.lastAccess);
+                            const statusBadge = clientData.isOnline 
+                                ? '<span style="color: #4ade80; font-weight: bold;">● 在线</span>' 
+                                : '<span style="color: #888;">○ 离线</span>';
+                            
+                            const detailsHtml = 
+                                '<div style="margin-bottom: 10px; font-weight: bold; font-size: 1.1rem; color: #ffffff; border-bottom: 1px solid rgba(255, 255, 255, 0.3); padding-bottom: 8px;">' +
+                                    (clientData.client || '未知客户端') + ' ' + statusBadge +
+                                '</div>' +
+                                '<div style="font-size: 0.9rem; color: #cccccc; line-height: 1.8;">' +
+                                    '<div style="margin-bottom: 8px;">' +
+                                        '<span style="color: #888;">📍 IP地址:</span> ' +
+                                        '<span style="color: #ffffff; font-weight: bold;">' + (clientData.ip || '未知') + '</span>' +
+                                    '</div>' +
+                                    '<div style="margin-bottom: 8px;">' +
+                                        '<span style="color: #888;">🕐 最后访问:</span> ' +
+                                        '<span style="color: #ffffff;">' + timeAgo + '</span>' +
+                                    '</div>' +
+                                    (clientData.userAgent ? 
+                                        '<div style="margin-bottom: 8px;">' +
+                                            '<span style="color: #888;">🔧 User-Agent:</span> ' +
+                                            '<span style="color: #ffffff; font-size: 0.85rem; word-break: break-all;">' + clientData.userAgent + '</span>' +
+                                        '</div>' : '') +
+                                '</div>';
+                            
+                            if (clientDetails) {
+                                clientDetails.innerHTML = detailsHtml;
+                                clientDetails.style.display = 'block';
+                            }
+                        });
+                    }
+                }
+                
+                // 更新加载状态
+                const loadingDiv = statsElement.querySelector('div:first-child');
+                if (loadingDiv && loadingDiv.textContent.includes('加载中')) {
+                    loadingDiv.style.display = 'none';
+                }
+                
+            } catch (error) {
+                const statsContent = document.getElementById('statsContent');
+                if (statsContent) {
+                    statsContent.innerHTML = '<div style="color: #ff6b6b;">⚠️ 加载统计信息失败: ' + error.message + '</div>';
+                }
+            }
+        }
+        
+        // 计算时间差
+        function getTimeAgo(timestamp) {
+            const now = Date.now();
+            const diff = now - timestamp;
+            const seconds = Math.floor(diff / 1000);
+            const minutes = Math.floor(seconds / 60);
+            const hours = Math.floor(minutes / 60);
+            const days = Math.floor(hours / 24);
+            
+            if (days > 0) return days + '天前';
+            if (hours > 0) return hours + '小时前';
+            if (minutes > 0) return minutes + '分钟前';
+            return seconds + '秒前';
+        }
+        
         async function checkSystemStatus() {
             try {
                 const cfStatus = document.getElementById('cfStatus');
@@ -3132,6 +3745,7 @@ async function handleSubscriptionPage(request, user = null) {
                     if (response.status === 503) {
                         // KV未配置
                         document.getElementById('kvStatus').innerHTML = '<span style="color: #ffffff;">' + t.kvDisabled + '</span>';
+                        document.getElementById('kvUsage').style.display = 'none';
                         document.getElementById('configCard').style.display = 'block';
                         document.getElementById('currentConfig').textContent = t.kvNotConfigured;
                 } else if (response.ok) {
@@ -3144,18 +3758,22 @@ async function handleSubscriptionPage(request, user = null) {
                             document.getElementById('configContent').style.display = 'block';
                             document.getElementById('configCard').style.display = 'block';
                             await loadCurrentConfig();
+                            await loadKVUsage();
                         } else {
                             document.getElementById('kvStatus').innerHTML = '<span style="color: #ffffff;">' + t.kvDisabled + '</span>';
+                            document.getElementById('kvUsage').style.display = 'none';
                             document.getElementById('configCard').style.display = 'block';
                             document.getElementById('currentConfig').textContent = t.kvNotEnabled;
                             }
                     } catch (jsonError) {
                         document.getElementById('kvStatus').innerHTML = '<span style="color: #ffffff;">' + t.kvCheckFailed + '</span>';
+                        document.getElementById('kvUsage').style.display = 'none';
                         document.getElementById('configCard').style.display = 'block';
                         document.getElementById('currentConfig').textContent = t.kvCheckFailedFormat;
                     }
                 } else {
                     document.getElementById('kvStatus').innerHTML = '<span style="color: #ffffff;">' + t.kvDisabled + '</span>';
+                    document.getElementById('kvUsage').style.display = 'none';
                     document.getElementById('configCard').style.display = 'block';
                     document.getElementById('currentConfig').textContent = t.kvCheckFailedStatus + response.status;
                 }
@@ -3168,8 +3786,50 @@ async function handleSubscriptionPage(request, user = null) {
                 }
                 
                 document.getElementById('kvStatus').innerHTML = '<span style="color: #ffffff;">⚠️ KV存储未启用或未配置</span>';
+                document.getElementById('kvUsage').style.display = 'none';
                 document.getElementById('configCard').style.display = 'block';
                 document.getElementById('currentConfig').textContent = 'KV存储检测失败 - 错误: ' + error.message;
+            }
+        }
+        
+        async function loadKVUsage() {
+            const apiUrl = window.location.pathname + '/api/config?usage=true';
+            
+            try {
+                const response = await fetch(apiUrl);
+                
+                if (response.status === 503 || !response.ok) {
+                    document.getElementById('kvUsage').style.display = 'none';
+                    return;
+                }
+                
+                const data = await response.json();
+                
+                if (data && data.kvUsage) {
+                    const usage = data.kvUsage;
+                    let usageText = '';
+                    
+                    if (usage.error) {
+                        usageText = '获取占用空间失败: ' + usage.error;
+                    } else {
+                        usageText = '总大小: ' + (usage.totalSizeFormatted || '0 B') + '<br>';
+                        usageText += '键数量: ' + (usage.keyCount || 0);
+                        
+                        if (usage.keys && usage.keys.length > 0) {
+                            usageText += '<br><br>键详情:<br>';
+                            usage.keys.forEach(key => {
+                                usageText += '  • ' + key.name + ': ' + key.sizeFormatted + '<br>';
+                            });
+                        }
+                    }
+                    
+                    document.getElementById('kvUsageInfo').innerHTML = usageText;
+                    document.getElementById('kvUsage').style.display = 'block';
+                } else {
+                    document.getElementById('kvUsage').style.display = 'none';
+                }
+            } catch (error) {
+                document.getElementById('kvUsage').style.display = 'none';
             }
         }
         
@@ -3427,6 +4087,9 @@ async function handleSubscriptionPage(request, user = null) {
         document.addEventListener('DOMContentLoaded', function() {
             // createMatrixRain(); // 已禁用动态背景
             checkSystemStatus();
+            loadSubscriptionStats();
+            // 每30秒更新一次订阅统计
+            setInterval(loadSubscriptionStats, 30000);
             checkKVStatus();
             
             // 监听customIP输入框变化，实时更新wk地区选择状态
@@ -3514,6 +4177,197 @@ async function handleSubscriptionPage(request, user = null) {
                         ispTelecom: document.getElementById('ispTelecom').checked ? 'yes' : 'no'
                     };
                     await saveConfig(configData);
+                });
+            }
+            
+            // 一键更换美女图片背景按钮
+            const changeBeautyBackgroundBtn = document.getElementById('changeBeautyBackgroundBtn');
+            if (changeBeautyBackgroundBtn) {
+                changeBeautyBackgroundBtn.addEventListener('click', async function(e) {
+                    e.preventDefault();
+                    
+                    // 显示加载状态
+                    const originalText = changeBeautyBackgroundBtn.textContent;
+                    changeBeautyBackgroundBtn.textContent = '加载中...';
+                    changeBeautyBackgroundBtn.disabled = true;
+                    
+                    try {
+                        // 使用专门的搜索关键词获取符合要求的图片（4K分辨率）
+                        // 使用Unsplash Source API通过精确关键词搜索
+                        const searchKeywords = [
+                            'nude+woman',
+                            'naked+woman',
+                            'nude+girl',
+                            'naked+girl',
+                            'nude+model',
+                            'naked+model',
+                            'nude+portrait',
+                            'naked+portrait'
+                        ];
+                        const randomKeyword = searchKeywords[Math.floor(Math.random() * searchKeywords.length)];
+                        
+                        // 使用Unsplash Source API通过精确关键词搜索，确保只获取符合要求的图片
+                        // 添加时间戳确保每次获取不同的图片
+                        const timestamp = Date.now() + Math.random();
+                        const imageUrl = 'https://source.unsplash.com/3840x2160/?' + encodeURIComponent(randomKeyword) + '&sig=' + timestamp;
+                        
+                        // 将获取到的图片URL填入输入框
+                        const customBackgroundImageInput = document.getElementById('customBackgroundImage');
+                        if (customBackgroundImageInput && imageUrl) {
+                            customBackgroundImageInput.value = imageUrl;
+                            
+                            // 自动保存配置
+                            const configData = {
+                                ev: document.getElementById('ev').checked ? 'yes' : 'no',
+                                et: document.getElementById('et').checked ? 'yes' : 'no',
+                                ex: document.getElementById('ex').checked ? 'yes' : 'no',
+                                es: document.getElementById('es').checked ? 'yes' : 'no',
+                                tp: document.getElementById('tp').value,
+                                d: document.getElementById('customPath').value,
+                                p: document.getElementById('customIP').value,
+                                yx: document.getElementById('preferredIPs').value,
+                                yxURL: document.getElementById('preferredIPsURL').value,
+                                s: document.getElementById('socksConfig').value,
+                                homepage: document.getElementById('customHomepage').value,
+                                bg: imageUrl
+                            };
+                            
+                            // 先预加载图片，确保图片可以正常加载
+                            const img = new Image();
+                            img.crossOrigin = 'anonymous';
+                            img.onload = function() {
+                                // 图片加载成功后立即更新背景
+                                document.body.style.backgroundImage = 'url("' + imageUrl + '")';
+                                document.body.style.backgroundSize = 'cover';
+                                document.body.style.backgroundPosition = 'center center';
+                                document.body.style.backgroundRepeat = 'no-repeat';
+                                document.body.style.backgroundAttachment = 'fixed';
+                                
+                                // 恢复按钮状态
+                                changeBeautyBackgroundBtn.textContent = originalText;
+                                changeBeautyBackgroundBtn.disabled = false;
+                                
+                                // 保存配置（不刷新页面）
+                                fetch(window.location.pathname + '/api/config', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify(configData)
+                                }).then(function(response) {
+                                    if (response.ok) {
+                                        showStatus('背景图片已更换！', 'success');
+                                    } else {
+                                        showStatus('配置保存失败，但背景已更新', 'error');
+                                    }
+                                }).catch(function(error) {
+                                    showStatus('配置保存失败，但背景已更新', 'error');
+                                });
+                            };
+                            img.onerror = function() {
+                                // 如果Picsum失败，尝试使用备用方案
+                                const backupUrl = 'https://picsum.photos/3840/2160?random=' + Date.now();
+                                document.body.style.backgroundImage = 'url("' + backupUrl + '")';
+                                document.body.style.backgroundSize = 'cover';
+                                document.body.style.backgroundPosition = 'center center';
+                                document.body.style.backgroundRepeat = 'no-repeat';
+                                document.body.style.backgroundAttachment = 'fixed';
+                                
+                                customBackgroundImageInput.value = backupUrl;
+                                configData.bg = backupUrl;
+                                
+                                // 保存配置
+                                fetch(window.location.pathname + '/api/config', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify(configData)
+                                }).then(function(response) {
+                                    if (response.ok) {
+                                        showStatus('背景图片已更换！', 'success');
+                                    } else {
+                                        showStatus('配置保存失败，但背景已更新', 'error');
+                                    }
+                                }).catch(function(error) {
+                                    showStatus('配置保存失败，但背景已更新', 'error');
+                                });
+                                
+                                changeBeautyBackgroundBtn.textContent = originalText;
+                                changeBeautyBackgroundBtn.disabled = false;
+                            };
+                            img.src = imageUrl;
+                        }
+                    } catch (error) {
+                        // 如果API请求失败，使用备用搜索关键词
+                        const backupKeywords = [
+                            'nude+woman',
+                            'naked+woman',
+                            'nude+girl',
+                            'naked+girl'
+                        ];
+                        const backupKeyword = backupKeywords[Math.floor(Math.random() * backupKeywords.length)];
+                        const timestamp = Date.now() + Math.random();
+                        const backupUrl = 'https://source.unsplash.com/3840x2160/?' + encodeURIComponent(backupKeyword) + '&sig=' + timestamp;
+                        
+                        const customBackgroundImageInput = document.getElementById('customBackgroundImage');
+                        if (customBackgroundImageInput) {
+                            customBackgroundImageInput.value = backupUrl;
+                            
+                            // 自动保存配置
+                            const configData = {
+                                ev: document.getElementById('ev').checked ? 'yes' : 'no',
+                                et: document.getElementById('et').checked ? 'yes' : 'no',
+                                ex: document.getElementById('ex').checked ? 'yes' : 'no',
+                                es: document.getElementById('es').checked ? 'yes' : 'no',
+                                tp: document.getElementById('tp').value,
+                                d: document.getElementById('customPath').value,
+                                p: document.getElementById('customIP').value,
+                                yx: document.getElementById('preferredIPs').value,
+                                yxURL: document.getElementById('preferredIPsURL').value,
+                                s: document.getElementById('socksConfig').value,
+                                homepage: document.getElementById('customHomepage').value,
+                                bg: backupUrl
+                            };
+                            
+                            // 先预加载图片，确保图片可以正常加载
+                            const img = new Image();
+                            img.crossOrigin = 'anonymous';
+                            img.onload = function() {
+                                // 图片加载成功后立即更新背景
+                                document.body.style.backgroundImage = 'url("' + backupUrl + '")';
+                                document.body.style.backgroundSize = 'cover';
+                                document.body.style.backgroundPosition = 'center center';
+                                document.body.style.backgroundRepeat = 'no-repeat';
+                                document.body.style.backgroundAttachment = 'fixed';
+                                
+                                // 恢复按钮状态（图片已加载成功）
+                                changeBeautyBackgroundBtn.textContent = originalText;
+                                changeBeautyBackgroundBtn.disabled = false;
+                                
+                                // 保存配置（不刷新页面）
+                                fetch(window.location.pathname + '/api/config', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify(configData)
+                                }).then(function(response) {
+                                    if (response.ok) {
+                                        showStatus('背景图片已更换！', 'success');
+                                    } else {
+                                        showStatus('配置保存失败，但背景已更新', 'error');
+                                    }
+                                }).catch(function(error) {
+                                    showStatus('配置保存失败，但背景已更新', 'error');
+                                });
+                            };
+                            img.onerror = function() {
+                                showStatus('图片加载失败，请重试', 'error');
+                                changeBeautyBackgroundBtn.textContent = originalText;
+                                changeBeautyBackgroundBtn.disabled = false;
+                            };
+                            img.src = backupUrl;
+                        }
+                    } finally {
+                        // 恢复按钮状态
+                        changeBeautyBackgroundBtn.textContent = originalText;
+                        changeBeautyBackgroundBtn.disabled = false;
+                    }
                 });
             }
         });
@@ -4357,8 +5211,8 @@ function generateShadowsocksLinksFromSource(list, user, workerDomain) {
                 const wsNodeName = `${nodeNameBase}-${port}-SS-WS-TLS`;
                 const ssConfig = `${method}:${user}`;
                 const encodedConfig = btoa(ssConfig);
-                // 使用标准格式：v2ray-plugin;mode=websocket;host=domain;path=/path;tls;sni=domain;skip-cert-verify=true
-                const pluginParams = `v2ray-plugin;mode=websocket;host=${workerDomain};path=${encodeURIComponent(wsPath)};tls;sni=${workerDomain};skip-cert-verify=true`;
+                // 使用标准格式：v2ray-plugin;mode=websocket;host=domain;path=/path;tls;sni=domain
+                const pluginParams = `v2ray-plugin;mode=websocket;host=${workerDomain};path=${encodeURIComponent(wsPath)};tls;sni=${workerDomain}`;
                 links.push(`ss://${encodedConfig}@${safeIP}:${port}?plugin=${encodeURIComponent(pluginParams)}#${encodeURIComponent(wsNodeName)}`);
             } else {
                 // shadowsocks-ws (非TLS)
@@ -4479,7 +5333,7 @@ function generateShadowsocksLinksFromNewIPs(list, user, workerDomain) {
             const wsNodeName = `${nodeName}-${port}-SS-WS-TLS`;
             const ssConfig = `${method}:${user}`;
             const encodedConfig = btoa(ssConfig);
-            const pluginParams = `v2ray-plugin;mode=websocket;host=${workerDomain};path=${encodeURIComponent(wsPath)};tls;sni=${workerDomain};skip-cert-verify=true`;
+            const pluginParams = `v2ray-plugin;mode=websocket;host=${workerDomain};path=${encodeURIComponent(wsPath)};tls;sni=${workerDomain}`;
             const link = `ss://${encodedConfig}@${item.ip}:${port}?plugin=${encodeURIComponent(pluginParams)}#${encodeURIComponent(wsNodeName)}`;
             links.push(link);
         } else if (CF_HTTP_PORTS.includes(port)) {
@@ -4496,7 +5350,7 @@ function generateShadowsocksLinksFromNewIPs(list, user, workerDomain) {
             const wsNodeName = `${nodeName}-${port}-SS-WS-TLS`;
             const ssConfig = `${method}:${user}`;
             const encodedConfig = btoa(ssConfig);
-            const pluginParams = `v2ray-plugin;mode=websocket;host=${workerDomain};path=${encodeURIComponent(wsPath)};tls;sni=${workerDomain};skip-cert-verify=true`;
+            const pluginParams = `v2ray-plugin;mode=websocket;host=${workerDomain};path=${encodeURIComponent(wsPath)};tls;sni=${workerDomain}`;
             const link = `ss://${encodedConfig}@${item.ip}:${port}?plugin=${encodeURIComponent(pluginParams)}#${encodeURIComponent(wsNodeName)}`;
             links.push(link);
         }
@@ -4546,10 +5400,20 @@ async function handleConfigAPI(request) {
             });
         }
         
-        return new Response(JSON.stringify({
+        const url = new URL(request.url);
+        const includeUsage = url.searchParams.get('usage') === 'true';
+        
+        const responseData = {
             ...kvConfig,
             kvEnabled: true
-        }), {
+        };
+        
+        if (includeUsage) {
+            const usage = await getKVUsage();
+            responseData.kvUsage = usage;
+        }
+        
+        return new Response(JSON.stringify(responseData), {
             headers: { 'Content-Type': 'application/json' }
         });
     } else if (request.method === 'POST') {
