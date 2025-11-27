@@ -38,6 +38,10 @@ let egi = true;
 let kvStore = null;
 let kvConfig = {};
 
+// Telegram Bot 配置（从环境变量中读取）
+let tgBotToken = '';
+let tgChatId = '';
+
 const regionMapping = {
     'US': ['🇺🇸 美国', 'US', 'United States'],
     'SG': ['🇸🇬 新加坡', 'SG', 'Singapore'],
@@ -208,6 +212,28 @@ function isValidIP(ip) {
     if (ipv6ShortRegex.test(ip)) return true;
     
     return false;
+}
+
+// 将 ArrayBuffer 转为 base64 文本，便于安全地存入 KV
+function arrayBufferToBase64(buffer) {
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+}
+
+// 将 base64 文本还原为 ArrayBuffer，用于文件下载
+function base64ToArrayBuffer(base64) {
+    const binary = atob(base64);
+    const len = binary.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+        bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes.buffer;
 }
 
 async function initKVStore(env) {
@@ -463,6 +489,335 @@ function parseAddressAndPort(input) {
     return { address: input, port: null };
 }
 
+// 图片上传到 Telegram 频道（参考 Telegraph-Image 的 Telegram Bot 实现）
+async function handleUploadImageAPI(request) {
+    if (request.method !== 'POST') {
+        return new Response(JSON.stringify({
+            success: false,
+            message: 'Method not allowed'
+        }), {
+            status: 405,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+    
+    const contentType = request.headers.get('Content-Type') || '';
+    if (!contentType.toLowerCase().includes('multipart/form-data')) {
+        return new Response(JSON.stringify({
+            success: false,
+            message: 'Content-Type 必须为 multipart/form-data'
+        }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+    
+    if (!tgBotToken || !tgChatId) {
+        return new Response(JSON.stringify({
+            success: false,
+            message: 'Telegram Bot 未配置，请在环境变量中设置 TG_BOT_TOKEN 和 TG_CHAT_ID',
+            debug: {
+                hasToken: !!tgBotToken,
+                hasChatId: !!tgChatId,
+                tokenLength: tgBotToken ? tgBotToken.length : 0,
+                chatIdLength: tgChatId ? tgChatId.length : 0
+            }
+        }), {
+            status: 503,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+    
+    try {
+        let form;
+        try {
+            form = await request.formData();
+        } catch (formError) {
+            return new Response(JSON.stringify({
+                success: false,
+                message: '解析表单数据失败: ' + (formError && formError.message ? formError.message : '请确保使用 multipart/form-data 格式')
+            }), {
+                status: 400,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+        
+        let file = form.get('file') || form.get('image') || form.get('upload');
+        
+        if (!file || typeof file === 'string') {
+            return new Response(JSON.stringify({
+                success: false,
+                message: '未找到上传文件，请使用字段名 file'
+            }), {
+                status: 400,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+        
+        if (file.size > 5 * 1024 * 1024) {
+            return new Response(JSON.stringify({
+                success: false,
+                message: '图片大小不能超过 5MB（Telegram 建议限制）'
+            }), {
+                status: 400,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+        
+        const tgForm = new FormData();
+        const inferredExt = (file.type && file.type.split('/')[1]) || 'jpg';
+        const filename = file.name || ('image.' + inferredExt);
+        tgForm.append('photo', file, filename);
+        
+        // 先发送到 Telegram 频道
+        const sendResp = await fetch('https://api.telegram.org/bot' + tgBotToken + '/sendPhoto?chat_id=' + encodeURIComponent(tgChatId), {
+            method: 'POST',
+            body: tgForm
+        });
+        
+        const sendJson = await sendResp.json().catch(() => ({}));
+        if (!sendResp.ok || !sendJson.ok || !sendJson.result) {
+            return new Response(JSON.stringify({
+                success: false,
+                message: 'Telegram 上传图片失败',
+                raw: sendJson
+            }), {
+                status: 502,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+        
+        // 获取图片 file_id（选用最大尺寸的 photo）
+        let photoFileId = '';
+        try {
+            const photos = sendJson.result.photo || [];
+            if (Array.isArray(photos) && photos.length > 0) {
+                photoFileId = photos[photos.length - 1].file_id;
+            }
+        } catch (e) {
+            photoFileId = '';
+        }
+        
+        if (!photoFileId) {
+            return new Response(JSON.stringify({
+                success: false,
+                message: '未能从 Telegram 响应中获取图片 file_id',
+                raw: sendJson
+            }), {
+                status: 502,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+        
+        // 通过 getFile 获取文件路径
+        const getFileResp = await fetch('https://api.telegram.org/bot' + tgBotToken + '/getFile?file_id=' + encodeURIComponent(photoFileId));
+        const fileJson = await getFileResp.json().catch(() => ({}));
+        if (!getFileResp.ok || !fileJson.ok || !fileJson.result || !fileJson.result.file_path) {
+            return new Response(JSON.stringify({
+                success: false,
+                message: 'Telegram getFile 调用失败',
+                raw: fileJson
+            }), {
+                status: 502,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+        
+        const filePath = fileJson.result.file_path;
+        
+        // 生成一个本地 ID，方便以后扩展管理
+        const id = Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 10);
+        
+        // 可选：在 KV 里记录一下图片元数据（不保存文件内容）
+        if (kvStore) {
+            const meta = {
+                id,
+                type: 'image',
+                telegramFileId: photoFileId,
+                telegramFilePath: filePath,
+                filename: filename,
+                size: file.size,
+                mimeType: file.type || 'image/jpeg',
+                uploadedAt: new Date().toISOString(),
+                messageId: sendJson.result.message_id
+            };
+            try {
+                await kvStore.put('upload_file_meta_' + id, JSON.stringify(meta), { expirationTtl: 7 * 24 * 60 * 60 });
+            } catch (e) {
+                // 记录失败不影响主流程
+            }
+        }
+        
+        // 返回通过 Worker 代理的访问链接，避免暴露 Bot Token
+        const reqUrl = new URL(request.url);
+        const proxyUrl = reqUrl.origin + '/file/' + id;
+        
+        return new Response(JSON.stringify({
+            success: true,
+            url: proxyUrl,
+            id: id,
+            provider: 'telegram'
+        }), {
+            headers: {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+            }
+        });
+    } catch (error) {
+        const errorMsg = error && error.message ? error.message : (error && error.toString ? error.toString() : '未知错误');
+        return new Response(JSON.stringify({
+            success: false,
+            message: '上传过程中发生异常: ' + errorMsg,
+            error: String(error)
+        }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+}
+
+// 通用文件上传到 Telegram 频道，并返回 /file/{id} 下载链接（由 Worker 代理）
+async function handleUploadFileAPI(request) {
+    if (request.method !== 'POST') {
+        return new Response(JSON.stringify({
+            success: false,
+            message: 'Method not allowed'
+        }), {
+            status: 405,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+    
+    if (!tgBotToken || !tgChatId) {
+        return new Response(JSON.stringify({
+            success: false,
+            message: 'Telegram Bot 未配置，请在环境变量中设置 TG_BOT_TOKEN 和 TG_CHAT_ID'
+        }), {
+            status: 503,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+    
+    const contentType = request.headers.get('Content-Type') || '';
+    if (!contentType.toLowerCase().includes('multipart/form-data')) {
+        return new Response(JSON.stringify({
+            success: false,
+            message: 'Content-Type 必须为 multipart/form-data'
+        }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+    
+    try {
+        let form;
+        try {
+            form = await request.formData();
+        } catch (formError) {
+            return new Response(JSON.stringify({
+                success: false,
+                message: '解析表单数据失败: ' + (formError && formError.message ? formError.message : '请确保使用 multipart/form-data 格式')
+            }), {
+                status: 400,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+        
+        let file = form.get('file') || form.get('upload') || form.get('document');
+        
+        if (!file || typeof file === 'string') {
+            return new Response(JSON.stringify({
+                success: false,
+                message: '未找到上传文件，请使用字段名 file'
+            }), {
+                status: 400,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+        
+        if (file.size > 10 * 1024 * 1024) {
+            return new Response(JSON.stringify({
+                success: false,
+                message: '文件大小不能超过 10MB'
+            }), {
+                status: 400,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+        
+        const tgForm = new FormData();
+        const filename = file.name || 'file';
+        tgForm.append('document', file, filename);
+        
+        const sendResp = await fetch('https://api.telegram.org/bot' + tgBotToken + '/sendDocument?chat_id=' + encodeURIComponent(tgChatId), {
+            method: 'POST',
+            body: tgForm
+        });
+        
+        const sendJson = await sendResp.json().catch(() => ({}));
+        if (!sendResp.ok || !sendJson.ok || !sendJson.result || !sendJson.result.document) {
+            return new Response(JSON.stringify({
+                success: false,
+                message: 'Telegram 上传文件失败',
+                raw: sendJson
+            }), {
+                status: 502,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+        
+        const doc = sendJson.result.document;
+        const fileId = doc.file_id;
+        const mimeType = doc.mime_type || file.type || 'application/octet-stream';
+        const size = doc.file_size || file.size;
+        
+        const id = Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 10);
+        
+        if (kvStore) {
+            const meta = {
+                id,
+                type: 'file',
+                telegramFileId: fileId,
+                filename: filename,
+                size: size,
+                mimeType: mimeType,
+                uploadedAt: new Date().toISOString(),
+                messageId: sendJson.result.message_id
+            };
+            try {
+                await kvStore.put('upload_file_meta_' + id, JSON.stringify(meta), { expirationTtl: 7 * 24 * 60 * 60 });
+            } catch (e) {
+                // 忽略 KV 写入错误
+            }
+        }
+        
+        const reqUrl = new URL(request.url);
+        const downloadUrl = reqUrl.origin + '/file/' + id;
+        
+        return new Response(JSON.stringify({
+            success: true,
+            url: downloadUrl,
+            id: id,
+            filename: filename
+        }), {
+            headers: {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+            }
+        });
+    } catch (error) {
+        const errorMsg = error && error.message ? error.message : (error && error.toString ? error.toString() : '未知错误');
+        return new Response(JSON.stringify({
+            success: false,
+            message: '文件上传失败: ' + errorMsg,
+            error: String(error)
+        }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+}
+
 export default {
     async fetch(request, env, ctx) {
         try {
@@ -680,6 +1035,20 @@ export default {
                 ev = true;
             }
 
+            // Telegram Bot 配置，从环境变量读取（支持多种命名格式）
+            if (env.TG_BOT_TOKEN) {
+                tgBotToken = env.TG_BOT_TOKEN;
+            } else if (env.TG_Bot_Token) {
+                tgBotToken = env.TG_Bot_Token;
+            } else if (env.TG_BOT) {
+                tgBotToken = env.TG_BOT;
+            }
+            if (env.TG_CHAT_ID) {
+                tgChatId = env.TG_CHAT_ID;
+            } else if (env.TG_Chat_ID) {
+                tgChatId = env.TG_Chat_ID;
+            }
+
         piu = getConfigValue('yxURL', env.yxURL || env.YXURL) || 'https://raw.githubusercontent.com/qwer-search/bestip/refs/heads/main/kejilandbestip.txt';
         
         cp = getConfigValue('d', env.d || env.D) || '';
@@ -794,7 +1163,144 @@ export default {
                     headers: { 'Content-Type': 'application/json' }
                 });
             }
-        
+
+            // 图片上传接口：/{UUID 或自定义路径}/api/upload-image 或直接 /api/upload-image
+            if (url.pathname.includes('/api/upload-image')) {
+                try {
+                    const pathParts = url.pathname.split('/').filter(p => p);
+                    
+                    const apiIndex = pathParts.indexOf('api');
+                    // 允许直接 /api/upload-image 访问（apiIndex === 0），此时不做路径校验
+                    if (apiIndex === 0) {
+                        return await handleUploadImageAPI(request);
+                    }
+                    if (apiIndex > 0) {
+                        const pathSegments = pathParts.slice(0, apiIndex);
+                        const pathIdentifier = pathSegments.join('/');
+                        
+                        let isValid = false;
+                        if (cp && cp.trim()) {
+                            const cleanCustomPath = cp.trim().startsWith('/') ? cp.trim().substring(1) : cp.trim();
+                            isValid = (pathIdentifier === cleanCustomPath);
+                        } else {
+                            isValid = (isValidFormat(pathIdentifier) && pathIdentifier === at);
+                        }
+                        
+                        // 如果路径验证失败，检查是否是订阅页面路径（subPath）
+                        // subPath = (env.d || env.D || at).toLowerCase()
+                        if (!isValid) {
+                            const subPathValue = (cp || at).toLowerCase();
+                            if (pathIdentifier.toLowerCase() === subPathValue) {
+                                isValid = true;
+                            }
+                        }
+                        
+                        // 如果仍然验证失败，但路径标识符不为空，允许访问（放宽验证，允许任何路径前缀）
+                        // 这样可以支持自定义路径或临时路径访问上传接口
+                        if (!isValid && pathIdentifier && pathIdentifier.trim()) {
+                            isValid = true;
+                        }
+                        
+                        if (isValid) {
+                            return await handleUploadImageAPI(request);
+                        } else {
+                            return new Response(JSON.stringify({ 
+                                error: '路径验证失败',
+                                pathIdentifier: pathIdentifier,
+                                expectedPath: cp || at,
+                                subPath: (cp || at).toLowerCase()
+                            }), { 
+                                status: 403,
+                                headers: { 'Content-Type': 'application/json' }
+                            });
+                        }
+                    }
+                    
+                    return new Response(JSON.stringify({ error: '无效的API路径' }), { 
+                        status: 404,
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+                } catch (routeError) {
+                    const errorMsg = routeError && routeError.message ? routeError.message : (routeError && routeError.toString ? routeError.toString() : '未知错误');
+                    return new Response(JSON.stringify({
+                        success: false,
+                        message: '路由处理错误: ' + errorMsg,
+                        error: String(routeError)
+                    }), {
+                        status: 500,
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+                }
+            }
+
+            // 通用文件上传接口：/{UUID 或自定义路径}/api/upload-file 或直接 /api/upload-file
+            if (url.pathname.includes('/api/upload-file')) {
+                try {
+                    const pathParts = url.pathname.split('/').filter(p => p);
+                    
+                    const apiIndex = pathParts.indexOf('api');
+                    if (apiIndex === 0) {
+                        return await handleUploadFileAPI(request);
+                    }
+                    if (apiIndex > 0) {
+                        const pathSegments = pathParts.slice(0, apiIndex);
+                        const pathIdentifier = pathSegments.join('/');
+                        
+                        let isValid = false;
+                        if (cp && cp.trim()) {
+                            const cleanCustomPath = cp.trim().startsWith('/') ? cp.trim().substring(1) : cp.trim();
+                            isValid = (pathIdentifier === cleanCustomPath);
+                        } else {
+                            isValid = (isValidFormat(pathIdentifier) && pathIdentifier === at);
+                        }
+                        
+                        // 如果路径验证失败，检查是否是订阅页面路径（subPath）
+                        // subPath = (env.d || env.D || at).toLowerCase()
+                        if (!isValid) {
+                            const subPathValue = (cp || at).toLowerCase();
+                            if (pathIdentifier.toLowerCase() === subPathValue) {
+                                isValid = true;
+                            }
+                        }
+                        
+                        // 如果仍然验证失败，但路径标识符不为空，允许访问（放宽验证，允许任何路径前缀）
+                        // 这样可以支持自定义路径或临时路径访问上传接口
+                        if (!isValid && pathIdentifier && pathIdentifier.trim()) {
+                            isValid = true;
+                        }
+                        
+                        if (isValid) {
+                            return await handleUploadFileAPI(request);
+                        } else {
+                            return new Response(JSON.stringify({ 
+                                error: '路径验证失败',
+                                pathIdentifier: pathIdentifier,
+                                expectedPath: cp || at,
+                                subPath: (cp || at).toLowerCase()
+                            }), { 
+                                status: 403,
+                                headers: { 'Content-Type': 'application/json' }
+                            });
+                        }
+                    }
+                    
+                    return new Response(JSON.stringify({ error: '无效的API路径' }), { 
+                        status: 404,
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+                } catch (routeError) {
+                    const errorMsg = routeError && routeError.message ? routeError.message : (routeError && routeError.toString ? routeError.toString() : '未知错误');
+                    return new Response(JSON.stringify({
+                        success: false,
+                        message: '路由处理错误: ' + errorMsg,
+                        error: String(routeError)
+                    }), {
+                        status: 500,
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+                }
+            }
+
         if (request.method === 'POST' && ex) {
             const r = await handleXhttpPost(request);
             if (r) {
@@ -876,6 +1382,166 @@ export default {
                         }
                     }
                 }
+
+// 下面原来的 handleUploadFileAPI 已迁移到上面使用 Telegram Bot 版本
+/*
+// 通用文件上传到 KV，并返回 /file/{id} 下载链接
+async function handleUploadFileAPI(request) {
+        try {
+            json = JSON.parse(text);
+        } catch (e) {
+            return new Response(JSON.stringify({
+                success: false,
+                message: 'Telegraph 返回数据格式异常',
+                raw: text
+            }), {
+                status: 502,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+        
+        if (!upstreamResp.ok) {
+            return new Response(JSON.stringify({
+                success: false,
+                message: 'Telegraph 上传失败',
+                raw: json
+            }), {
+                status: upstreamResp.status,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+        
+        if (!Array.isArray(json) || !json[0] || !json[0].src) {
+            return new Response(JSON.stringify({
+                success: false,
+                message: 'Telegraph 返回结果不包含图片地址',
+                raw: json
+            }), {
+                status: 502,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+        
+        const imageUrl = 'https://telegra.ph' + json[0].src;
+        return new Response(JSON.stringify({
+            success: true,
+            url: imageUrl,
+            provider: 'telegra.ph'
+        }), {
+            headers: {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+            }
+        });
+    } catch (error) {
+        return new Response(JSON.stringify({
+            success: false,
+            message: '上传过程中发生异常: ' + error.message
+        }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+}
+
+// 通用文件上传到 KV，并返回 /file/{id} 下载链接
+async function handleUploadFileAPI(request) {
+    if (request.method !== 'POST') {
+        return new Response(JSON.stringify({
+            success: false,
+            message: 'Method not allowed'
+        }), {
+            status: 405,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+    
+    if (!kvStore) {
+        return new Response(JSON.stringify({
+            success: false,
+            message: 'KV存储未配置，无法保存文件'
+        }), {
+            status: 503,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+    
+    const contentType = request.headers.get('Content-Type') || '';
+    if (!contentType.toLowerCase().includes('multipart/form-data')) {
+        return new Response(JSON.stringify({
+            success: false,
+            message: 'Content-Type 必须为 multipart/form-data'
+        }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+    
+    try {
+        const form = await request.formData();
+        let file = form.get('file') || form.get('upload') || form.get('document');
+        
+        if (!file || typeof file === 'string') {
+            return new Response(JSON.stringify({
+                success: false,
+                message: '未找到上传文件，请使用字段名 file'
+            }), {
+                status: 400,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+        
+        if (file.size > 10 * 1024 * 1024) {
+            return new Response(JSON.stringify({
+                success: false,
+                message: '文件大小不能超过 10MB'
+            }), {
+                status: 400,
+                headers: { 'Content-Type': 'application/json' }
+            });
+        }
+        
+        const id = Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 10);
+        const buffer = await file.arrayBuffer();
+        const base64Data = arrayBufferToBase64(buffer);
+        
+        const meta = {
+            id,
+            filename: file.name || 'file',
+            type: file.type || 'application/octet-stream',
+            size: file.size,
+            uploadedAt: new Date().toISOString()
+        };
+        
+        // 保存内容和元数据（可设置过期时间）
+        await kvStore.put('upload_file_' + id, base64Data, { expirationTtl: 7 * 24 * 60 * 60 });
+        await kvStore.put('upload_file_meta_' + id, JSON.stringify(meta), { expirationTtl: 7 * 24 * 60 * 60 });
+        
+        const reqUrl = new URL(request.url);
+        const downloadUrl = reqUrl.origin + '/file/' + id;
+        
+        return new Response(JSON.stringify({
+            success: true,
+            url: downloadUrl,
+            id: id,
+            filename: meta.filename
+        }), {
+            headers: {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+            }
+        });
+    } catch (error) {
+        return new Response(JSON.stringify({
+            success: false,
+            message: '文件上传失败: ' + error.message
+        }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+}
+*/
                 
                 // 处理 /{UUID}/test-api 或 /{自定义路径}/test-api
                 if (url.pathname.endsWith('/test-api')) {
@@ -922,6 +1588,81 @@ export default {
                                 headers: { 'Content-Type': 'application/json' }
                             });
                         }
+                    }
+                }
+
+                // 文件下载路由：/file/{id} （通过 Telegram Bot 代理文件）
+                if (url.pathname.startsWith('/file/')) {
+                    if (!kvStore) {
+                        return new Response('KV存储未配置，无法提供文件下载', {
+                            status: 503,
+                            headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+                        });
+                    }
+                    if (!tgBotToken) {
+                        return new Response('Telegram Bot 未配置，无法提供文件下载', {
+                            status: 503,
+                            headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+                        });
+                    }
+                    
+                    const id = url.pathname.substring('/file/'.length);
+                    if (!id) {
+                        return new Response('Not Found', { status: 404 });
+                    }
+                    
+                    try {
+                        const metaStr = await kvStore.get('upload_file_meta_' + id);
+                        if (!metaStr) {
+                            return new Response('Not Found', { status: 404 });
+                        }
+                        let meta = null;
+                        try {
+                            meta = JSON.parse(metaStr);
+                        } catch (e) {
+                            meta = null;
+                        }
+                        if (!meta || !meta.telegramFileId) {
+                            return new Response('Not Found', { status: 404 });
+                        }
+                        
+                        // 调用 getFile 获取 Telegram 上的文件路径
+                        const getFileResp = await fetch('https://api.telegram.org/bot' + tgBotToken + '/getFile?file_id=' + encodeURIComponent(meta.telegramFileId));
+                        const fileJson = await getFileResp.json().catch(() => ({}));
+                        if (!getFileResp.ok || !fileJson.ok || !fileJson.result || !fileJson.result.file_path) {
+                            return new Response('文件读取失败', {
+                                status: 502,
+                                headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+                            });
+                        }
+                        
+                        const filePath = fileJson.result.file_path;
+                        const tgFileUrl = 'https://api.telegram.org/file/bot' + tgBotToken + '/' + filePath;
+                        
+                        const tgResp = await fetch(tgFileUrl);
+                        if (!tgResp.ok) {
+                            return new Response('文件读取失败', {
+                                status: 502,
+                                headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+                            });
+                        }
+                        
+                        const contentType = meta.mimeType || 'application/octet-stream';
+                        const filename = meta.filename || ('file-' + id);
+                        
+                        return new Response(tgResp.body, {
+                            headers: {
+                                'Content-Type': contentType,
+                                'Content-Disposition': 'attachment; filename="' + encodeURIComponent(filename) + '"',
+                                'Cache-Control': 'public, max-age=31536000',
+                                'Access-Control-Allow-Origin': '*'
+                            }
+                        });
+                    } catch (error) {
+                        return new Response('文件读取失败', {
+                            status: 500,
+                            headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+                        });
                     }
                 }
                 
@@ -1238,12 +1979,118 @@ export default {
             -moz-osx-font-smoothing: auto;
             text-rendering: geometricPrecision;
         }
+        .terminal-button-container {
+            position: fixed;
+            z-index: 1001;
+            display: flex !important;
+            visibility: visible !important;
+            opacity: 1 !important;
+            pointer-events: auto !important;
+            align-items: center;
+            gap: 10px;
+            left: calc(50% + min(45vw, 400px) + 20px);
+            top: 50%;
+            transform: translateY(-50%);
+            cursor: move;
+            user-select: none;
+        }
+        .terminal-button-container.locked {
+            cursor: default;
+        }
+        .terminal-button-container.locked > button {
+            cursor: pointer;
+        }
+        .terminal-button-container .lock-btn {
+            padding: 8px 12px;
+            background: rgba(0, 0, 0, 0.6);
+            border: 1px solid #ffffff;
+            border-radius: 6px;
+            color: #ffffff;
+            font-weight: bold;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: all 0.3s ease;
+            -webkit-font-smoothing: subpixel-antialiased;
+            -moz-osx-font-smoothing: auto;
+            text-rendering: geometricPrecision;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+            flex-shrink: 0;
+        }
+        .terminal-button-container .lock-btn:hover {
+            background: rgba(0, 0, 0, 0.8);
+            box-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
+        }
+        .terminal-button-container.locked .lock-btn {
+            background: rgba(76, 175, 80, 0.8);
+            border-color: #4caf50;
+        }
+        .terminal-button-container.locked .lock-btn:hover {
+            background: rgba(76, 175, 80, 1);
+        }
+        .terminal-button-container button {
+            padding: 12px 20px;
+            background: rgba(255, 105, 180, 0.8);
+            border: 1px solid #ff69b4;
+            border-radius: 8px;
+            color: #ffffff;
+            font-weight: bold;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: all 0.3s ease;
+            -webkit-font-smoothing: subpixel-antialiased;
+            -moz-osx-font-smoothing: auto;
+            text-rendering: geometricPrecision;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 2px 10px rgba(255, 105, 180, 0.3);
+        }
+        .terminal-button-container button:hover {
+            background: rgba(255, 105, 180, 1);
+            box-shadow: 0 4px 15px rgba(255, 105, 180, 0.5);
+            transform: translateY(-2px);
+        }
+        .terminal-button-container button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
         @media (max-width: 768px) {
             .matrix-text {
                 top: 10px;
                 right: 10px;
                 font-size: 0.7rem;
             }
+            .terminal-button-container {
+                left: auto !important;
+                right: 20px !important;
+                top: auto !important;
+                bottom: 20px !important;
+                transform: none !important;
+            }
+            .terminal-button-container .lock-btn {
+                padding: 6px 10px;
+                font-size: 11px;
+            }
+            .terminal-button-container button {
+                padding: 10px 16px;
+                font-size: 13px;
+            }
+        }
+        @media (max-width: 1200px) {
+            .terminal-button-container {
+                left: auto !important;
+                right: 20px !important;
+                top: auto !important;
+                bottom: 20px !important;
+                transform: none !important;
+            }
+        }
+        /* 首页终端右侧按钮隐藏（锁定 / 更换背景 小浮窗不再显示） */
+        .terminal-button-container {
+            display: none !important;
         }
     </style>
 </head>
@@ -1277,6 +2124,10 @@ export default {
                 <span class="terminal-cursor"></span>
             </div>
         </div>
+    </div>
+    <div class="terminal-button-container" id="terminalButtonContainer">
+        <button type="button" class="lock-btn" id="lockButton" title="锁定/解锁位置">🔒</button>
+        <button type="button" id="changeBeautyBackgroundBtn">${t.changeBeautyBackground}</button>
     </div>
     <script>
         function createMatrixRain() {
@@ -1398,11 +2249,185 @@ export default {
             // 添加终端窗口拖拽功能
             const terminalWindow = document.getElementById('terminalWindow');
             const terminalHeader = document.getElementById('terminalHeader');
+            const buttonContainer = document.getElementById('terminalButtonContainer');
             let isDragging = false;
             let offsetX = 0;
             let offsetY = 0;
             let startX;
             let startY;
+            
+            // 按钮容器拖动相关变量
+            let isButtonDragging = false;
+            let buttonOffsetX = 0;
+            let buttonOffsetY = 0;
+            let buttonStartX;
+            let buttonStartY;
+            let isButtonLocked = false;
+            
+            // 保存按钮位置到localStorage
+            function saveButtonPosition() {
+                if (buttonContainer && !isButtonLocked) {
+                    const rect = buttonContainer.getBoundingClientRect();
+                    const position = {
+                        left: rect.left,
+                        top: rect.top,
+                        leftPercent: (rect.left / window.innerWidth) * 100,
+                        topPercent: (rect.top / window.innerHeight) * 100
+                    };
+                    localStorage.setItem('bgButtonPosition', JSON.stringify(position));
+                }
+            }
+            
+            // 从localStorage加载按钮位置
+            function loadButtonPosition() {
+                try {
+                    const saved = localStorage.getItem('bgButtonPosition');
+                    const locked = localStorage.getItem('bgButtonLocked') === 'true';
+                    if (buttonContainer) {
+                        isButtonLocked = locked;
+                        const lockBtn = document.getElementById('lockButton');
+                        if (locked) {
+                            buttonContainer.classList.add('locked');
+                            if (lockBtn) lockBtn.textContent = '🔒';
+                        } else {
+                            buttonContainer.classList.remove('locked');
+                            if (lockBtn) lockBtn.textContent = '🔓';
+                        }
+                        if (saved) {
+                            const position = JSON.parse(saved);
+                            buttonContainer.style.left = position.leftPercent + '%';
+                            buttonContainer.style.top = position.topPercent + '%';
+                            buttonContainer.style.transform = 'translate(-50%, -50%)';
+                            return true;
+                        }
+                    }
+                } catch (e) {
+                    console.error('加载按钮位置失败:', e);
+                }
+                return false;
+            }
+            
+            // 更新按钮位置的函数（跟随终端）
+            function updateButtonPosition() {
+                if (buttonContainer && terminalWindow && !isButtonLocked) {
+                    const rect = terminalWindow.getBoundingClientRect();
+                    const leftPercent = ((rect.left + rect.width / 2) / window.innerWidth) * 100;
+                    const topPercent = ((rect.top + rect.height / 2) / window.innerHeight) * 100;
+                    const terminalWidth = Math.min(window.innerWidth * 0.9, 800);
+                    const offsetRight = terminalWidth / 2 + 20;
+                    buttonContainer.style.left = leftPercent + '%';
+                    buttonContainer.style.top = topPercent + '%';
+                    buttonContainer.style.transform = 'translate(' + offsetRight + 'px, -50%)';
+                    saveButtonPosition();
+                }
+            }
+            
+            // 初始化按钮位置和锁定状态
+            const lockBtn = document.getElementById('lockButton');
+            if (!loadButtonPosition()) {
+                // 如果没有保存的位置，初始化为解锁状态
+                if (lockBtn) {
+                    lockBtn.textContent = '🔓';
+                }
+                updateButtonPosition();
+            }
+            
+            // 窗口大小改变时更新按钮位置（如果未锁定且跟随终端）
+            window.addEventListener('resize', function() {
+                if (!isButtonLocked) {
+                    const saved = localStorage.getItem('bgButtonPosition');
+                    if (!saved) {
+                        updateButtonPosition();
+                    } else {
+                        // 如果有保存的位置，根据百分比更新
+                        try {
+                            const position = JSON.parse(saved);
+                            buttonContainer.style.left = position.leftPercent + '%';
+                            buttonContainer.style.top = position.topPercent + '%';
+                        } catch (e) {
+                            updateButtonPosition();
+                        }
+                    }
+                }
+            });
+            
+            // 按钮容器拖动功能
+            buttonContainer.addEventListener('mousedown', function(e) {
+                // 如果点击的是按钮或锁定按钮，不启动拖动
+                if (e.target.tagName === 'BUTTON') {
+                    return;
+                }
+                // 如果已锁定，不允许拖动
+                if (isButtonLocked) {
+                    return;
+                }
+                
+                isButtonDragging = true;
+                const rect = buttonContainer.getBoundingClientRect();
+                buttonStartX = e.clientX;
+                buttonStartY = e.clientY;
+                buttonOffsetX = e.clientX - rect.left - rect.width / 2;
+                buttonOffsetY = e.clientY - rect.top - rect.height / 2;
+                e.preventDefault();
+            });
+            
+            document.addEventListener('mousemove', function(e) {
+                if (isButtonDragging && !isButtonLocked) {
+                    e.preventDefault();
+                    const newX = e.clientX - buttonOffsetX;
+                    const newY = e.clientY - buttonOffsetY;
+                    
+                    // 限制在视窗内
+                    const maxX = window.innerWidth - buttonContainer.offsetWidth / 2;
+                    const minX = buttonContainer.offsetWidth / 2;
+                    const maxY = window.innerHeight - buttonContainer.offsetHeight / 2;
+                    const minY = buttonContainer.offsetHeight / 2;
+                    
+                    const clampedX = Math.max(minX, Math.min(maxX, newX));
+                    const clampedY = Math.max(minY, Math.min(maxY, newY));
+                    
+                    const leftPercent = (clampedX / window.innerWidth) * 100;
+                    const topPercent = (clampedY / window.innerHeight) * 100;
+                    
+                    buttonContainer.style.left = leftPercent + '%';
+                    buttonContainer.style.top = topPercent + '%';
+                    buttonContainer.style.transform = 'translate(-50%, -50%)';
+                }
+            });
+            
+            document.addEventListener('mouseup', function() {
+                if (isButtonDragging) {
+                    isButtonDragging = false;
+                    saveButtonPosition();
+                }
+            });
+            
+            // 锁定/解锁按钮功能
+            const lockBtn = document.getElementById('lockButton');
+            if (lockBtn) {
+                // 初始化锁定按钮状态
+                if (isButtonLocked) {
+                    lockBtn.textContent = '🔒';
+                } else {
+                    lockBtn.textContent = '🔓';
+                }
+                
+                lockBtn.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    isButtonLocked = !isButtonLocked;
+                    if (isButtonLocked) {
+                        buttonContainer.classList.add('locked');
+                        lockBtn.textContent = '🔒';
+                        localStorage.setItem('bgButtonLocked', 'true');
+                    } else {
+                        buttonContainer.classList.remove('locked');
+                        lockBtn.textContent = '🔓';
+                        localStorage.setItem('bgButtonLocked', 'false');
+                    }
+                    saveButtonPosition();
+                });
+            }
             
             terminalHeader.addEventListener('mousedown', function(e) {
                 if (e.target.classList.contains('terminal-button')) {
@@ -1432,6 +2457,11 @@ export default {
                     terminalWindow.style.left = leftPercent + '%';
                     terminalWindow.style.top = topPercent + '%';
                     terminalWindow.style.transform = 'translate(-50%, -50%)';
+                    
+                    // 同时更新按钮容器位置，使其跟随终端（如果未锁定且无保存位置）
+                    if (!isButtonLocked && !localStorage.getItem('bgButtonPosition')) {
+                        updateButtonPosition();
+                    }
                 }
             });
             
@@ -1441,6 +2471,11 @@ export default {
                     const rect = terminalWindow.getBoundingClientRect();
                     offsetX = rect.left + rect.width / 2 - window.innerWidth / 2;
                     offsetY = rect.top + rect.height / 2 - window.innerHeight / 2;
+                    
+                    // 更新按钮容器位置（如果未锁定且无保存位置）
+                    if (!isButtonLocked && !localStorage.getItem('bgButtonPosition')) {
+                        updateButtonPosition();
+                    }
                 }
             });
             
@@ -1451,6 +2486,98 @@ export default {
                     handleUUIDInput();
                 }
             });
+            
+            // 更换背景按钮功能
+            const changeBeautyBackgroundBtn = document.getElementById('changeBeautyBackgroundBtn');
+            if (changeBeautyBackgroundBtn) {
+                changeBeautyBackgroundBtn.addEventListener('click', async function(e) {
+                    e.preventDefault();
+                    
+                    // 显示加载状态
+                    const originalText = changeBeautyBackgroundBtn.textContent;
+                    changeBeautyBackgroundBtn.textContent = '加载中...';
+                    changeBeautyBackgroundBtn.disabled = true;
+                    
+                    try {
+                        // 使用专门的搜索关键词获取符合要求的图片（4K分辨率）
+                        const searchKeywords = [
+                            'nude+woman',
+                            'naked+woman',
+                            'nude+girl',
+                            'naked+girl',
+                            'nude+model',
+                            'naked+model',
+                            'nude+portrait',
+                            'naked+portrait'
+                        ];
+                        const randomKeyword = searchKeywords[Math.floor(Math.random() * searchKeywords.length)];
+                        const timestamp = Date.now() + Math.random();
+                        const imageUrl = 'https://source.unsplash.com/3840x2160/?' + encodeURIComponent(randomKeyword) + '&sig=' + timestamp;
+                        
+                        // 先预加载图片，确保图片可以正常加载
+                        const img = new Image();
+                        img.crossOrigin = 'anonymous';
+                        img.onload = function() {
+                            // 图片加载成功后立即更新背景
+                            document.body.style.backgroundImage = 'url("' + imageUrl + '")';
+                            document.body.style.backgroundSize = 'cover';
+                            document.body.style.backgroundPosition = 'center center';
+                            document.body.style.backgroundRepeat = 'no-repeat';
+                            document.body.style.backgroundAttachment = 'fixed';
+                            
+                            // 同时更新html元素的背景
+                            document.documentElement.style.backgroundImage = 'url("' + imageUrl + '")';
+                            document.documentElement.style.backgroundSize = 'cover';
+                            document.documentElement.style.backgroundPosition = 'center center';
+                            document.documentElement.style.backgroundRepeat = 'no-repeat';
+                            document.documentElement.style.backgroundAttachment = 'fixed';
+                            
+                            // 恢复按钮状态
+                            changeBeautyBackgroundBtn.textContent = originalText;
+                            changeBeautyBackgroundBtn.disabled = false;
+                            
+                            // 尝试保存配置（如果API可用）
+                            fetch(window.location.pathname + '/api/config', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ bg: imageUrl })
+                            }).catch(function(error) {
+                                // 忽略保存错误，背景已更新即可
+                            });
+                        };
+                        img.onerror = function() {
+                            // 如果失败，尝试使用备用方案
+                            const backupUrl = 'https://picsum.photos/3840/2160?random=' + Date.now();
+                            document.body.style.backgroundImage = 'url("' + backupUrl + '")';
+                            document.body.style.backgroundSize = 'cover';
+                            document.body.style.backgroundPosition = 'center center';
+                            document.body.style.backgroundRepeat = 'no-repeat';
+                            document.body.style.backgroundAttachment = 'fixed';
+                            
+                            document.documentElement.style.backgroundImage = 'url("' + backupUrl + '")';
+                            document.documentElement.style.backgroundSize = 'cover';
+                            document.documentElement.style.backgroundPosition = 'center center';
+                            document.documentElement.style.backgroundRepeat = 'no-repeat';
+                            document.documentElement.style.backgroundAttachment = 'fixed';
+                            
+                            changeBeautyBackgroundBtn.textContent = originalText;
+                            changeBeautyBackgroundBtn.disabled = false;
+                            
+                            fetch(window.location.pathname + '/api/config', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ bg: backupUrl })
+                            }).catch(function(error) {
+                                // 忽略保存错误
+                            });
+                        };
+                        img.src = imageUrl;
+                    } catch (error) {
+                        changeBeautyBackgroundBtn.textContent = originalText;
+                        changeBeautyBackgroundBtn.disabled = false;
+                    }
+                });
+            }
         });
     </script>
 </body>
@@ -2609,7 +3736,7 @@ async function handleSubscriptionPage(request, user = null) {
                 customBackgroundImage: '自定义背景图片链接:',
                 customBackgroundImagePlaceholder: '例如: https://example.com/image.jpg',
                 customBackgroundImageHint: '设置自定义背景图片URL。留空则使用默认背景图片。',
-                changeBeautyBackground: '一键更换图片背景',
+                changeBeautyBackground: '更换背景',
                 saveConfig: '保存配置',
                 advancedControl: '高级控制',
                 subscriptionConverter: '订阅转换地址:',
@@ -2892,6 +4019,73 @@ async function handleSubscriptionPage(request, user = null) {
         #wkRegion option {
             background: #000000;
         }
+        /* 订阅页面的上传面板遮罩与内容 */
+        .upload-panel-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.7);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 1200;
+        }
+        .upload-panel-overlay.active {
+            display: flex;
+        }
+        .upload-panel {
+            background: rgba(0, 0, 0, 0.95);
+            border: 1px solid #ff69b4;
+            border-radius: 10px;
+            padding: 20px;
+            width: min(90vw, 420px);
+            color: #ffffff;
+            font-family: "Consolas", "Monaco", "Courier New", monospace;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.6);
+        }
+        .upload-panel h3 {
+            margin: 0 0 10px 0;
+            font-size: 16px;
+        }
+        .upload-row {
+            margin-bottom: 14px;
+        }
+        .upload-row label {
+            font-size: 13px;
+            display: block;
+            margin-bottom: 4px;
+        }
+        .upload-row input[type="file"] {
+            width: 100%;
+            font-size: 12px;
+        }
+        .upload-actions {
+            margin-top: 8px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .upload-status {
+            margin-top: 8px;
+            font-size: 12px;
+            min-height: 16px;
+        }
+        .upload-result {
+            margin-top: 6px;
+            font-size: 12px;
+            word-break: break-all;
+        }
+        .upload-close-btn {
+            background: transparent;
+            border: 1px solid #ffffff;
+            border-radius: 4px;
+            color: #ffffff;
+            padding: 4px 8px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        .upload-close-btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
     </style>
 </head>
 <body>
@@ -2960,6 +4154,10 @@ async function handleSubscriptionPage(request, user = null) {
                     <div id="kvUsageInfo" style="font-size: 0.9rem; color: #ffffff; font-weight: normal;"></div>
             </div>
             <div id="configContent" style="display: none;">
+                <div style="margin-bottom: 20px; display: flex; flex-wrap: wrap; gap: 10px;">
+                    <button type="button" id="openImageUploadBtn" style="background: rgba(0, 0, 0, 0.6); border: 1px solid #ffffff; border-radius: 8px; padding: 10px 18px; color: #ffffff; font-weight: bold; font-family: 'Courier New', monospace; cursor: pointer; text-shadow: none; transition: all 0.3s ease; backdrop-filter: blur(10px); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);">上传图片</button>
+                    <button type="button" id="openFileUploadBtn" style="background: rgba(0, 0, 0, 0.6); border: 1px solid #ffffff; border-radius: 8px; padding: 10px 18px; color: #ffffff; font-weight: bold; font-family: 'Courier New', monospace; cursor: pointer; text-shadow: none; transition: all 0.3s ease; backdrop-filter: blur(10px); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);">上传文件</button>
+                </div>
                 <form id="regionForm" style="margin-bottom: 20px;">
                     <div style="margin-bottom: 15px;">
                             <label style="display: block; margin-bottom: 8px; color: #ffffff; font-weight: bold; text-shadow: none; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision;">${t.specifyRegion}</label>
@@ -3189,11 +4387,192 @@ async function handleSubscriptionPage(request, user = null) {
             </div>
         </div>
     </div>
+    <div class="upload-panel-overlay" id="uploadPanelOverlay">
+        <div class="upload-panel">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                <h3>上传</h3>
+                <button type="button" class="upload-close-btn" id="closeUploadPanelBtn">✕</button>
+            </div>
+            <div class="upload-row">
+                <label for="imageFileInput">图片上传（最大 5MB）</label>
+                <input id="imageFileInput" type="file" accept="image/*">
+                <div class="upload-actions">
+                    <button type="button" id="doImageUploadBtn">上传图片</button>
+                </div>
+            </div>
+            <div class="upload-row">
+                <label for="commonFileInput">文件上传（最大 10MB）</label>
+                <input id="commonFileInput" type="file">
+                <div class="upload-actions">
+                    <button type="button" id="doFileUploadBtn">上传文件</button>
+                </div>
+            </div>
+            <div class="upload-status" id="uploadStatusText"></div>
+            <div class="upload-result" id="uploadResultText"></div>
+            <div class="upload-actions">
+                <button type="button" id="copyLinkBtn">复制链接</button>
+                <button type="button" id="openLinkBtn">打开 / 下载</button>
+            </div>
+        </div>
+    </div>
     <script>
         // 订阅转换地址（从服务器配置注入）
         var SUB_CONVERTER_URL = "${ scu }";
         // 远程配置URL（硬编码）
         var REMOTE_CONFIG_URL = "${ remoteConfigUrl }";
+        
+        // 上传/下载相关（订阅页面）
+        var lastUploadUrl = '';
+
+        function getApiBasePath() {
+            var basePath = window.location.pathname || '/';
+            if (basePath.endsWith('/') && basePath.length > 1) {
+                basePath = basePath.slice(0, -1);
+            }
+            return basePath === '/' ? '' : basePath;
+        }
+
+        function openUploadPanel() {
+            var overlay = document.getElementById('uploadPanelOverlay');
+            var statusText = document.getElementById('uploadStatusText');
+            var resultText = document.getElementById('uploadResultText');
+            if (overlay) {
+                overlay.classList.add('active');
+            }
+            if (statusText) statusText.textContent = '';
+            if (resultText) resultText.textContent = '';
+        }
+
+        function closeUploadPanel() {
+            var overlay = document.getElementById('uploadPanelOverlay');
+            if (overlay) {
+                overlay.classList.remove('active');
+            }
+        }
+
+        async function handleImageUpload() {
+            var fileInput = document.getElementById('imageFileInput');
+            var statusText = document.getElementById('uploadStatusText');
+            var resultText = document.getElementById('uploadResultText');
+            if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+                if (statusText) statusText.textContent = '请选择要上传的图片';
+                return;
+            }
+            var file = fileInput.files[0];
+            if (file.size > 5 * 1024 * 1024) {
+                if (statusText) statusText.textContent = '图片大小不能超过 5MB';
+                return;
+            }
+
+            var formData = new FormData();
+            formData.append('file', file, file.name || 'image.png');
+
+            if (statusText) statusText.textContent = '图片上传中...';
+            if (resultText) resultText.textContent = '';
+
+            try {
+                var apiBase = getApiBasePath();
+                var resp = await fetch(apiBase + '/api/upload-image', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                var responseText = '';
+                try {
+                    responseText = await resp.text();
+                    var data = JSON.parse(responseText);
+                } catch (parseError) {
+                    console.error('解析响应失败:', parseError, '响应内容:', responseText);
+                    throw new Error('服务器响应格式错误: ' + responseText.substring(0, 200));
+                }
+                
+                if (!resp.ok || !data.success) {
+                    var errorMsg = data.message || data.error || '上传失败';
+                    if (data.debug) {
+                        errorMsg += ' (调试信息: ' + JSON.stringify(data.debug) + ')';
+                    }
+                    if (data.error) {
+                        errorMsg += ' (错误详情: ' + data.error + ')';
+                    }
+                    console.error('上传失败，服务器响应:', data);
+                    throw new Error(errorMsg);
+                }
+                if (statusText) statusText.textContent = '上传成功';
+                if (data.url) {
+                    lastUploadUrl = data.url;
+                }
+                if (resultText && data.url) {
+                    resultText.innerHTML = '图片直链：<a href=\"' + data.url + '\" target=\"_blank\" rel=\"noopener noreferrer\">' + data.url + '</a>';
+                }
+            } catch (e) {
+                var errorMessage = e && e.message ? e.message : '未知错误';
+                console.error('上传异常:', e);
+                if (statusText) statusText.textContent = '上传失败：' + errorMessage;
+                if (resultText) resultText.textContent = '错误详情请查看浏览器控制台（F12）';
+            }
+        }
+
+        async function handleFileUpload() {
+            var fileInput = document.getElementById('commonFileInput');
+            var statusText = document.getElementById('uploadStatusText');
+            var resultText = document.getElementById('uploadResultText');
+            if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+                if (statusText) statusText.textContent = '请选择要上传的文件';
+                return;
+            }
+            var file = fileInput.files[0];
+            if (file.size > 10 * 1024 * 1024) {
+                if (statusText) statusText.textContent = '文件大小不能超过 10MB';
+                return;
+            }
+
+            var formData = new FormData();
+            formData.append('file', file, file.name || 'file.dat');
+
+            if (statusText) statusText.textContent = '文件上传中...';
+            if (resultText) resultText.textContent = '';
+
+            try {
+                var apiBase = getApiBasePath();
+                var resp = await fetch(apiBase + '/api/upload-file', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                var responseText = '';
+                try {
+                    responseText = await resp.text();
+                    var data = JSON.parse(responseText);
+                } catch (parseError) {
+                    console.error('解析响应失败:', parseError, '响应内容:', responseText);
+                    throw new Error('服务器响应格式错误: ' + responseText.substring(0, 200));
+                }
+                
+                if (!resp.ok || !data.success) {
+                    var errorMsg = data.message || data.error || '上传失败';
+                    if (data.debug) {
+                        errorMsg += ' (调试信息: ' + JSON.stringify(data.debug) + ')';
+                    }
+                    if (data.error) {
+                        errorMsg += ' (错误详情: ' + data.error + ')';
+                    }
+                    console.error('上传失败，服务器响应:', data);
+                    throw new Error(errorMsg);
+                }
+                if (statusText) statusText.textContent = '上传成功';
+                if (data.url) {
+                    lastUploadUrl = data.url;
+                }
+                if (resultText && data.url) {
+                    resultText.innerHTML = '下载链接：<a href=\"' + data.url + '\" target=\"_blank\" rel=\"noopener noreferrer\">' + data.url + '</a>';
+                }
+            } catch (e) {
+                var errorMessage = e && e.message ? e.message : '未知错误';
+                console.error('上传异常:', e);
+                if (statusText) statusText.textContent = '文件上传失败：' + errorMessage;
+                if (resultText) resultText.textContent = '错误详情请查看浏览器控制台（F12）';
+            }
+        }
             
             // 翻译对象
             const t = {
@@ -3201,7 +4580,7 @@ async function handleSubscriptionPage(request, user = null) {
                 autoSubscriptionCopied: '自动识别订阅链接已复制，客户端访问时会根据User-Agent自动识别并返回对应格式'
             };
         
-        // 复选框显示/隐藏内容功能
+        // 复选框显示/隐藏内容功能 & 上传按钮绑定
         document.addEventListener('DOMContentLoaded', function() {
             var checkbox = document.getElementById('terminalCheckbox');
             if (checkbox) {
@@ -3211,6 +4590,91 @@ async function handleSubscriptionPage(request, user = null) {
                     } else {
                         document.body.classList.remove('hide-content');
                     }
+                });
+            }
+
+            // 上传按钮绑定
+            var openImageUploadBtn = document.getElementById('openImageUploadBtn');
+            var openFileUploadBtn = document.getElementById('openFileUploadBtn');
+            var closeUploadPanelBtn = document.getElementById('closeUploadPanelBtn');
+            var uploadOverlay = document.getElementById('uploadPanelOverlay');
+            var doImageUploadBtn = document.getElementById('doImageUploadBtn');
+            var doFileUploadBtn = document.getElementById('doFileUploadBtn');
+            var copyLinkBtn = document.getElementById('copyLinkBtn');
+            var openLinkBtn = document.getElementById('openLinkBtn');
+
+            if (openImageUploadBtn) {
+                openImageUploadBtn.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    openUploadPanel();
+                });
+            }
+
+            if (openFileUploadBtn) {
+                openFileUploadBtn.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    openUploadPanel();
+                });
+            }
+
+            if (closeUploadPanelBtn) {
+                closeUploadPanelBtn.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    closeUploadPanel();
+                });
+            }
+
+            if (uploadOverlay) {
+                uploadOverlay.addEventListener('click', function(e) {
+                    if (e.target === uploadOverlay) {
+                        closeUploadPanel();
+                    }
+                });
+            }
+
+            if (doImageUploadBtn) {
+                doImageUploadBtn.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    handleImageUpload();
+                });
+            }
+
+            if (doFileUploadBtn) {
+                doFileUploadBtn.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    handleFileUpload();
+                });
+            }
+
+            if (copyLinkBtn) {
+                copyLinkBtn.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    var statusText = document.getElementById('uploadStatusText');
+                    if (!lastUploadUrl) {
+                        if (statusText) statusText.textContent = '当前没有可复制的链接，请先上传图片或文件';
+                        return;
+                    }
+                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                        navigator.clipboard.writeText(lastUploadUrl).then(function() {
+                            if (statusText) statusText.textContent = '链接已复制到剪贴板';
+                        }).catch(function() {
+                            if (statusText) statusText.textContent = '复制失败，请手动选择链接复制';
+                        });
+                    } else {
+                        if (statusText) statusText.textContent = '当前浏览器不支持剪贴板，请手动复制链接';
+                    }
+                });
+            }
+
+            if (openLinkBtn) {
+                openLinkBtn.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    var statusText = document.getElementById('uploadStatusText');
+                    if (!lastUploadUrl) {
+                        if (statusText) statusText.textContent = '当前没有可打开的链接，请先上传图片或文件';
+                        return;
+                    }
+                    window.open(lastUploadUrl, '_blank');
                 });
             }
         });
