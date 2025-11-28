@@ -1666,8 +1666,27 @@ async function handleUploadFileAPI(request) {
                     }
                 }
                 
-                // 处理背景图片代理
-                if (url.pathname === '/bg-image' || url.pathname === '/background-image') {
+                // 处理 favicon.ico 请求，返回透明 1x1 PNG 避免 404 错误（支持子路径）
+                if (url.pathname === '/favicon.ico' || url.pathname.endsWith('/favicon.ico')) {
+                    // 返回透明 1x1 PNG 图片的 base64
+                    const transparentPng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+                    const binaryString = atob(transparentPng);
+                    const bytes = new Uint8Array(binaryString.length);
+                    for (let i = 0; i < binaryString.length; i++) {
+                        bytes[i] = binaryString.charCodeAt(i);
+                    }
+                    return new Response(bytes.buffer, {
+                        headers: {
+                            'Content-Type': 'image/png',
+                            'Cache-Control': 'public, max-age=86400',
+                            'Access-Control-Allow-Origin': '*',
+                        }
+                    });
+                }
+                
+                // 处理背景图片代理（支持子路径，如 /test/bg-image）
+                if (url.pathname === '/bg-image' || url.pathname === '/background-image' || 
+                    url.pathname.endsWith('/bg-image') || url.pathname.endsWith('/background-image')) {
                     try {
                         // 优先检查用户自定义的背景图片链接
                         const customBgUrl = getConfigValue('bg', '');
@@ -2128,6 +2147,7 @@ async function handleUploadFileAPI(request) {
     <div class="terminal-button-container" id="terminalButtonContainer">
         <button type="button" class="lock-btn" id="lockButton" title="锁定/解锁位置">🔒</button>
         <button type="button" id="changeBeautyBackgroundBtn">${t.changeBeautyBackground}</button>
+        <button type="button" id="downloadBackgroundBtn">${t.downloadBackgroundImage}</button>
     </div>
     <script>
         function createMatrixRain() {
@@ -2575,6 +2595,65 @@ async function handleUploadFileAPI(request) {
                     } catch (error) {
                         changeBeautyBackgroundBtn.textContent = originalText;
                         changeBeautyBackgroundBtn.disabled = false;
+                    }
+                });
+            }
+            
+            // 下载背景图片按钮功能
+            const downloadBackgroundBtn = document.getElementById('downloadBackgroundBtn');
+            if (downloadBackgroundBtn) {
+                downloadBackgroundBtn.addEventListener('click', async function(e) {
+                    e.preventDefault();
+                    
+                    const originalText = downloadBackgroundBtn.textContent;
+                    downloadBackgroundBtn.textContent = '下载中...';
+                    downloadBackgroundBtn.disabled = true;
+                    
+                    try {
+                        // 使用 /bg-image 端点下载，这样可以避免 CORS 问题
+                        const bgImageUrl = window.location.origin + window.location.pathname + '/bg-image';
+                        
+                        // 获取图片数据
+                        const response = await fetch(bgImageUrl);
+                        
+                        if (!response.ok) {
+                            throw new Error('无法获取图片: ' + response.status);
+                        }
+                        
+                        const blob = await response.blob();
+                        const url = window.URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        
+                        // 从响应头或 blob 类型中获取文件扩展名
+                        const contentType = response.headers.get('Content-Type') || blob.type;
+                        let extension = 'png';
+                        if (contentType.includes('jpeg') || contentType.includes('jpg')) {
+                            extension = 'jpg';
+                        } else if (contentType.includes('png')) {
+                            extension = 'png';
+                        } else if (contentType.includes('webp')) {
+                            extension = 'webp';
+                        } else if (contentType.includes('gif')) {
+                            extension = 'gif';
+                        }
+                        
+                        // 生成文件名（带时间戳）
+                        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+                        a.download = 'background-image-' + timestamp + '.' + extension;
+                        
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        window.URL.revokeObjectURL(url);
+                        
+                        downloadBackgroundBtn.textContent = originalText;
+                        downloadBackgroundBtn.disabled = false;
+                    } catch (error) {
+                        console.error('下载失败:', error);
+                        alert('下载失败: ' + (error.message || '未知错误'));
+                        downloadBackgroundBtn.textContent = originalText;
+                        downloadBackgroundBtn.disabled = false;
                     }
                 });
             }
@@ -3737,6 +3816,7 @@ async function handleSubscriptionPage(request, user = null) {
                 customBackgroundImagePlaceholder: '例如: https://example.com/image.jpg',
                 customBackgroundImageHint: '设置自定义背景图片URL。留空则使用默认背景图片。',
                 changeBeautyBackground: '更换背景',
+                downloadBackgroundImage: '下载背景',
                 saveConfig: '保存配置',
                 advancedControl: '高级控制',
                 subscriptionConverter: '订阅转换地址:',
@@ -4076,15 +4156,33 @@ async function handleSubscriptionPage(request, user = null) {
         }
         .upload-close-btn {
             background: transparent;
-            border: 1px solid #ffffff;
+            border: 1px solid #ff69b4;
             border-radius: 4px;
-            color: #ffffff;
+            color: #ff69b4;
             padding: 4px 8px;
             cursor: pointer;
             font-size: 12px;
         }
         .upload-close-btn:hover {
-            background: rgba(255, 255, 255, 0.1);
+            background: rgba(255, 105, 180, 0.2);
+        }
+        .upload-actions button {
+            background: rgba(255, 105, 180, 0.8);
+            border: 1px solid #ff69b4;
+            border-radius: 6px;
+            color: #ffffff;
+            padding: 8px 16px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: bold;
+            font-family: "Consolas", "Monaco", "Courier New", monospace;
+            transition: all 0.3s ease;
+            box-shadow: 0 2px 8px rgba(255, 105, 180, 0.3);
+        }
+        .upload-actions button:hover {
+            background: rgba(255, 105, 180, 1);
+            box-shadow: 0 4px 12px rgba(255, 105, 180, 0.5);
+            transform: translateY(-2px);
         }
     </style>
 </head>
@@ -4155,8 +4253,8 @@ async function handleSubscriptionPage(request, user = null) {
             </div>
             <div id="configContent" style="display: none;">
                 <div style="margin-bottom: 20px; display: flex; flex-wrap: wrap; gap: 10px;">
-                    <button type="button" id="openImageUploadBtn" style="background: rgba(0, 0, 0, 0.6); border: 1px solid #ffffff; border-radius: 8px; padding: 10px 18px; color: #ffffff; font-weight: bold; font-family: 'Courier New', monospace; cursor: pointer; text-shadow: none; transition: all 0.3s ease; backdrop-filter: blur(10px); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);">上传图片</button>
-                    <button type="button" id="openFileUploadBtn" style="background: rgba(0, 0, 0, 0.6); border: 1px solid #ffffff; border-radius: 8px; padding: 10px 18px; color: #ffffff; font-weight: bold; font-family: 'Courier New', monospace; cursor: pointer; text-shadow: none; transition: all 0.3s ease; backdrop-filter: blur(10px); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);">上传文件</button>
+                    <button type="button" id="openImageUploadBtn" style="background: rgba(255, 105, 180, 0.8); border: 1px solid #ff69b4; border-radius: 8px; padding: 10px 18px; color: #ffffff; font-weight: bold; font-family: 'Courier New', monospace; cursor: pointer; text-shadow: none; transition: all 0.3s ease; backdrop-filter: blur(10px); box-shadow: 0 2px 10px rgba(255, 105, 180, 0.3);">上传图片</button>
+                    <button type="button" id="openFileUploadBtn" style="background: rgba(255, 105, 180, 0.8); border: 1px solid #ff69b4; border-radius: 8px; padding: 10px 18px; color: #ffffff; font-weight: bold; font-family: 'Courier New', monospace; cursor: pointer; text-shadow: none; transition: all 0.3s ease; backdrop-filter: blur(10px); box-shadow: 0 2px 10px rgba(255, 105, 180, 0.3);">上传文件</button>
                 </div>
                 <form id="regionForm" style="margin-bottom: 20px;">
                     <div style="margin-bottom: 15px;">
@@ -4226,6 +4324,7 @@ async function handleSubscriptionPage(request, user = null) {
                             <div style="display: flex; gap: 10px; align-items: flex-start;">
                                 <input type="text" id="customBackgroundImage" placeholder="${t.customBackgroundImagePlaceholder}" style="flex: 1; padding: 12px; background: rgba(0, 0, 0, 0.6); border: 1px solid #ffffff; border-radius: 8px; color: #ffffff; font-weight: bold; font-family: 'Courier New', monospace; font-size: 14px; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; backdrop-filter: blur(10px);">
                                 <button type="button" id="changeBeautyBackgroundBtn" style="padding: 12px 20px; background: rgba(255, 105, 180, 0.8); border: 1px solid #ff69b4; border-radius: 8px; color: #ffffff; font-weight: bold; font-family: 'Courier New', monospace; font-size: 14px; cursor: pointer; white-space: nowrap; transition: all 0.3s ease; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; backdrop-filter: blur(10px); box-shadow: 0 2px 10px rgba(255, 105, 180, 0.3);">${t.changeBeautyBackground}</button>
+                                <button type="button" id="downloadBackgroundBtn" style="padding: 12px 20px; background: rgba(76, 175, 80, 0.8); border: 1px solid #4caf50; border-radius: 8px; color: #ffffff; font-weight: bold; font-family: 'Courier New', monospace; font-size: 14px; cursor: pointer; white-space: nowrap; transition: all 0.3s ease; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; backdrop-filter: blur(10px); box-shadow: 0 2px 10px rgba(76, 175, 80, 0.3);">${t.downloadBackgroundImage}</button>
                             </div>
                             <small style="color: #ffffff; font-weight: bold; font-size: 0.85rem; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; text-shadow: none; opacity: 1; display: block; margin-top: 8px;">${t.customBackgroundImageHint}</small>
                     </div>
@@ -5300,16 +5399,31 @@ async function handleSubscriptionPage(request, user = null) {
         async function loadCurrentConfig() {
             const apiUrl = window.location.pathname + '/api/config';
             
+            // 显示加载提示
+            showStatus('正在加载配置...', 'info');
+            const currentConfigElement = document.getElementById('currentConfig');
+            if (currentConfigElement) {
+                currentConfigElement.textContent = '正在加载配置...';
+            }
+            
             try {
                 const response = await fetch(apiUrl);
                 
                 if (response.status === 503) {
-                    document.getElementById('currentConfig').textContent = 'KV存储未配置，无法加载配置';
+                    const errorMsg = 'KV存储未配置，无法加载配置';
+                    if (currentConfigElement) {
+                        currentConfigElement.textContent = errorMsg;
+                    }
+                    showStatus(errorMsg, 'error');
                     return;
                 }
                 if (!response.ok) {
                     const errorText = await response.text();
-                    document.getElementById('currentConfig').textContent = '加载配置失败: ' + errorText;
+                    const errorMsg = '加载配置失败: ' + errorText;
+                    if (currentConfigElement) {
+                        currentConfigElement.textContent = errorMsg;
+                    }
+                    showStatus(errorMsg, 'error');
                     return;
                 }
                 const config = await response.json();
@@ -5331,7 +5445,9 @@ async function handleSubscriptionPage(request, user = null) {
                     }
                 }
                 
-                document.getElementById('currentConfig').textContent = configText;
+                if (currentConfigElement) {
+                    currentConfigElement.textContent = configText;
+                }
                 
                 // 更新表单值
                 document.getElementById('wkRegion').value = config.wk || '';
@@ -5368,8 +5484,15 @@ async function handleSubscriptionPage(request, user = null) {
                 // 检查p变量，如果有值则禁用wk地区选择
                 updateWkRegionState();
                 
+                // 显示成功提示
+                showStatus('配置已刷新', 'success');
+                
             } catch (error) {
-                document.getElementById('currentConfig').textContent = '加载配置失败: ' + error.message;
+                const errorMsg = '加载配置失败: ' + error.message;
+                if (currentConfigElement) {
+                    currentConfigElement.textContent = errorMsg;
+                }
+                showStatus(errorMsg, 'error');
             }
         }
         
@@ -5478,11 +5601,31 @@ async function handleSubscriptionPage(request, user = null) {
         
         function showStatus(message, type) {
             const statusDiv = document.getElementById('statusMessage');
+            if (!statusDiv) return;
+            
             statusDiv.textContent = message;
             statusDiv.style.display = 'block';
-            statusDiv.style.color = '#ffffff';
             statusDiv.style.fontWeight = 'bold';
-            statusDiv.style.borderColor = 'transparent';
+            
+            // 根据类型设置不同的颜色和边框
+            switch(type) {
+                case 'success':
+                    statusDiv.style.color = '#4ade80';
+                    statusDiv.style.borderColor = '#4ade80';
+                    statusDiv.style.background = 'rgba(74, 222, 128, 0.2)';
+                    break;
+                case 'error':
+                    statusDiv.style.color = '#f87171';
+                    statusDiv.style.borderColor = '#f87171';
+                    statusDiv.style.background = 'rgba(248, 113, 113, 0.2)';
+                    break;
+                case 'info':
+                default:
+                    statusDiv.style.color = '#60a5fa';
+                    statusDiv.style.borderColor = '#60a5fa';
+                    statusDiv.style.background = 'rgba(96, 165, 250, 0.2)';
+                    break;
+            }
             
             setTimeout(function() {
                 statusDiv.style.display = 'none';
@@ -5831,6 +5974,66 @@ async function handleSubscriptionPage(request, user = null) {
                         // 恢复按钮状态
                         changeBeautyBackgroundBtn.textContent = originalText;
                         changeBeautyBackgroundBtn.disabled = false;
+                    }
+                });
+            }
+            
+            // 下载背景图片按钮功能（设置界面）
+            const downloadBackgroundBtn = document.getElementById('downloadBackgroundBtn');
+            if (downloadBackgroundBtn) {
+                downloadBackgroundBtn.addEventListener('click', async function(e) {
+                    e.preventDefault();
+                    
+                    const originalText = downloadBackgroundBtn.textContent;
+                    downloadBackgroundBtn.textContent = '下载中...';
+                    downloadBackgroundBtn.disabled = true;
+                    
+                    try {
+                        // 使用 /bg-image 端点下载，这样可以避免 CORS 问题
+                        const bgImageUrl = window.location.origin + window.location.pathname + '/bg-image';
+                        
+                        // 获取图片数据
+                        const response = await fetch(bgImageUrl);
+                        
+                        if (!response.ok) {
+                            throw new Error('无法获取图片: ' + response.status);
+                        }
+                        
+                        const blob = await response.blob();
+                        const url = window.URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        
+                        // 从响应头或 blob 类型中获取文件扩展名
+                        const contentType = response.headers.get('Content-Type') || blob.type;
+                        let extension = 'png';
+                        if (contentType.includes('jpeg') || contentType.includes('jpg')) {
+                            extension = 'jpg';
+                        } else if (contentType.includes('png')) {
+                            extension = 'png';
+                        } else if (contentType.includes('webp')) {
+                            extension = 'webp';
+                        } else if (contentType.includes('gif')) {
+                            extension = 'gif';
+                        }
+                        
+                        // 生成文件名（带时间戳）
+                        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+                        a.download = 'background-image-' + timestamp + '.' + extension;
+                        
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                        window.URL.revokeObjectURL(url);
+                        
+                        downloadBackgroundBtn.textContent = originalText;
+                        downloadBackgroundBtn.disabled = false;
+                        showStatus('图片下载成功！', 'success');
+                    } catch (error) {
+                        console.error('下载失败:', error);
+                        showStatus('下载失败: ' + (error.message || '未知错误'), 'error');
+                        downloadBackgroundBtn.textContent = originalText;
+                        downloadBackgroundBtn.disabled = false;
                     }
                 });
             }
