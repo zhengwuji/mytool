@@ -38,6 +38,9 @@ let egi = true;
 let kvStore = null;
 let kvConfig = {};
 
+// 暴力尝试防护：存储每个IP的失败次数和禁止时间
+const bruteForceProtection = new Map();
+
 // Telegram Bot 配置（从环境变量中读取）
 let tgBotToken = '';
 let tgChatId = '';
@@ -105,23 +108,7 @@ const regionMapping = {
     'Multacom': ['Multacom', 'Multacom']
 };
 
-let backupIPs = [
-    { domain: 'ProxyIP.US.CMLiussss.net', region: 'US', regionCode: 'US', port: 443 },
-    { domain: 'ProxyIP.SG.CMLiussss.net', region: 'SG', regionCode: 'SG', port: 443 },
-    { domain: 'ProxyIP.JP.CMLiussss.net', region: 'JP', regionCode: 'JP', port: 443 },
-    { domain: 'ProxyIP.HK.CMLiussss.net', region: 'HK', regionCode: 'HK', port: 443 },
-    { domain: 'ProxyIP.KR.CMLiussss.net', region: 'KR', regionCode: 'KR', port: 443 },
-    { domain: 'ProxyIP.TW.CMLiussss.net', region: 'TW', regionCode: 'TW', port: 443 },
-    { domain: 'ProxyIP.DE.CMLiussss.net', region: 'DE', regionCode: 'DE', port: 443 },
-    { domain: 'ProxyIP.SE.CMLiussss.net', region: 'SE', regionCode: 'SE', port: 443 },
-    { domain: 'ProxyIP.NL.CMLiussss.net', region: 'NL', regionCode: 'NL', port: 443 },
-    { domain: 'ProxyIP.FI.CMLiussss.net', region: 'FI', regionCode: 'FI', port: 443 },
-    { domain: 'ProxyIP.GB.CMLiussss.net', region: 'GB', regionCode: 'GB', port: 443 },
-    { domain: 'ProxyIP.Oracle.cmliussss.net', region: 'Oracle', regionCode: 'Oracle', port: 443 },
-    { domain: 'ProxyIP.DigitalOcean.CMLiussss.net', region: 'DigitalOcean', regionCode: 'DigitalOcean', port: 443 },
-    { domain: 'ProxyIP.Vultr.CMLiussss.net', region: 'Vultr', regionCode: 'Vultr', port: 443 },
-    { domain: 'ProxyIP.Multacom.CMLiussss.net', region: 'Multacom', regionCode: 'Multacom', port: 443 }
-];
+let backupIPs = [];
 
 const directDomains = [
     { name: "cloudflare.182682.xyz", domain: "cloudflare.182682.xyz" }, { name: "speed.marisalnc.com", domain: "speed.marisalnc.com" },
@@ -937,6 +924,141 @@ async function handleUploadFileAPI(request) {
     }
 }
 
+
+async function 验证反代IP(反代IP地址, 指定端口) {
+    const 最大重试次数 = 4;
+    let 最后错误 = null;
+    const 开始时间 = performance.now();
+    // 对于连接级别的重试，每次都重新建立连接
+    for (let 重试次数 = 0; 重试次数 < 最大重试次数; 重试次数++) {
+        let TCP接口 = null;
+        let 传输数据 = null;
+        let 读取数据 = null;
+
+        try {
+            // 每次重试都重新建立连接
+            const 连接超时 = 1000 + (重试次数 * 500); // 递增超时时间
+            TCP接口 = await 带超时连接({ hostname: 反代IP地址, port: 指定端口 }, 连接超时);
+
+            传输数据 = TCP接口.writable.getWriter();
+            读取数据 = TCP接口.readable.getReader();
+
+            // 发送TLS握手
+            await 传输数据.write(构建TLS握手());
+
+            // 读取响应，超时时间也递增
+            const 读取超时 = 连接超时;
+            const { value: 返回数据, 超时 } = await 带超时读取(读取数据, 读取超时);
+
+            if (超时) {
+                最后错误 = `第${重试次数 + 1}次重试：读取响应超时`;
+                throw new Error(最后错误);
+            }
+
+            if (!返回数据 || 返回数据.length === 0) {
+                最后错误 = `第${重试次数 + 1}次重试：未收到任何响应数据`;
+                throw new Error(最后错误);
+            }
+
+            // 检查TLS响应
+            if (返回数据[0] === 0x16) {
+                // 成功，清理资源
+                try {
+                    读取数据.cancel();
+                    TCP接口.close();
+                } catch (cleanupError) {
+                    console.log('清理资源时出错:', cleanupError);
+                }
+                return [true, `第${重试次数 + 1}次验证有效ProxyIP`, Math.round(performance.now() - 开始时间)];
+            } else {
+                最后错误 = `第${重试次数 + 1}次重试：收到非TLS响应(0x${返回数据[0].toString(16).padStart(2, '0')})`;
+                throw new Error(最后错误);
+            }
+
+        } catch (error) {
+            // 记录具体错误
+            最后错误 = `第${重试次数 + 1}次重试失败: ${error.message || error.toString()}`;
+
+            // 判断是否应该继续重试
+            const 错误信息 = error.message || error.toString();
+            const 不应重试的错误 = [
+                '连接被拒绝',
+                'Connection refused',
+                '网络不可达',
+                'Network unreachable',
+                '主机不可达',
+                'Host unreachable'
+            ];
+
+            const 应该停止重试 = 不应重试的错误.some(errorPattern =>
+                错误信息.toLowerCase().includes(errorPattern.toLowerCase())
+            );
+
+            if (应该停止重试) {
+                最后错误 = `连接失败，无需重试: ${错误信息}`;
+                break; // 跳出重试循环
+            }
+
+        } finally {
+            // 确保每次重试后都清理资源
+            try {
+                if (读取数据) {
+                    读取数据.cancel();
+                }
+                if (TCP接口) {
+                    TCP接口.close();
+                }
+            } catch (cleanupError) {
+                console.log('清理资源时出错:', cleanupError);
+            }
+
+            // 等待资源完全释放
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+
+        // 如果不是最后一次重试，等待一段时间再重试
+        if (重试次数 < 最大重试次数 - 1) {
+            const 等待时间 = 200 + (重试次数 * 300); // 递增等待时间
+            await new Promise(resolve => setTimeout(resolve, 等待时间));
+        }
+    }
+
+    // 所有重试都失败了
+    return [false, 最后错误 || '连接验证失败', -1];
+}
+
+function 构建TLS握手() {
+    const hexStr =
+        '16030107a30100079f0303af1f4d78be2002cf63e8c727224cf1ee4a8ac89a0ad04bc54cbed5cd7c830880203d8326ae1d1d076ec749df65de6d21dec7371c589056c0a548e31624e121001e0020baba130113021303c02bc02fc02cc030cca9cca8c013c014009c009d002f0035010007361a1a0000000a000c000acaca11ec001d00170018fe0d00ba0000010001fc00206a2fb0535a0a5e565c8a61dcb381bab5636f1502bbd09fe491c66a2d175095370090dd4d770fc5e14f4a0e13cfd919a532d04c62eb4a53f67b1375bf237538cea180470d942bdde74611afe80d70ad25afb1d5f02b2b4eed784bc2420c759a742885f6ca982b25d0fdd7d8f618b7f7bc10172f61d446d8f8a6766f3587abbae805b8ef40fcb819194ac49e91c6c3762775f8dc269b82a21ddccc9f6f43be62323147b411475e47ea2c4efe52ef2cef5c7b32000d00120010040308040401050308050501080606010010000e000c02683208687474702f312e31000b0002010000050005010000000044cd00050003026832001b00030200020017000000230000002d000201010012000000000010000e00000b636861746770742e636f6dff01000100002b0007061a1a03040303003304ef04edcaca00010011ec04c05eac5510812e46c13826d28279b13ce62b6464e01ae1bb6d49640e57fb3191c656c4b0167c246930699d4f467c19d60dacaa86933a49e5c97390c3249db33c1aa59f47205701419461569cb01a22b4378f5f3bb21d952700f250a6156841f2cc952c75517a481112653400913f9ab58982a3f2d0010aba5ae99a2d69f6617a4220cd616de58ccbf5d10c5c68150152b60e2797521573b10413cb7a3aab25409d426a5b64a9f3134e01dc0dd0fc1a650c7aafec00ca4b4dddb64c402252c1c69ca347bb7e49b52b214a7768657a808419173bcbea8aa5a8721f17c82bc6636189b9ee7921faa76103695a638585fe678bcbb8725831900f808863a74c52a1b2caf61f1dec4a9016261c96720c221f45546ce0e93af3276dd090572db778a865a07189ae4f1a64c6dbaa25a5b71316025bd13a6012994257929d199a7d90a59285c75bd4727a8c93484465d62379cd110170073aad2a3fd947087634574315c09a7ccb60c301d59a7c37a330253a994a6857b8556ce0ac3cda4c6fe3855502f344c0c8160313a3732bce289b6bda207301e7b318277331578f370ccbcd3730890b552373afeb162c0cb59790f79559123b2d437308061608a704626233d9f73d18826e27f1c00157b792460eda9b35d48b4515a17c6125bdb96b114503c99e7043b112a398888318b956a012797c8a039a51147b8a58071793c14a3611fb0424e865f48a61cac7c43088c634161cea089921d229e1a370effc5eff2215197541394854a201a6ebf74942226573bb95710454bd27a52d444690837d04611b676269873c50c3406a79077e6606478a841f96f7b076a2230fd34f3eea301b77bf00750c28357a9df5b04f192b9c0bbf4f71891f1842482856b021280143ae74356c5e6a8e3273893086a90daa7a92426d8c370a45e3906994b8fa7a57d66b503745521e40948e83641de2a751b4a836da54f2da413074c3d856c954250b5c8332f1761e616437e527c0840bc57d522529b9259ccac34d7a3888f0aade0a66c392458cc1a698443052413217d29fbb9a1124797638d76100f82807934d58f30fcff33197fc171cfa3b0daa7f729591b1d7389ad476fde2328af74effd946265b3b81fa33066923db476f71babac30b590e05a7ba2b22f86925abca7ef8058c2481278dd9a240c8816bba6b5e6603e30670dffa7e6e3b995b0b18ec404614198a43a07897d84b439878d179c7d6895ac3f42ecb7998d4491060d2b8a5316110830c3f20a3d9a488a85976545917124c1eb6eb7314ea9696712b7bcab1cfd2b66e5a85106b2f651ab4b8a145e18ac41f39a394da9f327c5c92d4a297a0c94d1b8dcc3b111a700ac8d81c45f983ca029fd2887ad4113c7a23badf807c6d0068b4fa7148402aae15cc55971b57669a4840a22301caaec392a6ea6d46dab63890594d41545ebc2267297e3f4146073814bb3239b3e566684293b9732894193e71f3b388228641bb8be6f5847abb9072d269cb40b353b6aa3259ccb7e438d6a37ffa8cc1b7e4911575c41501321769900d19792aa3cfbe58b0aaf91c91d3b63900697279ad6c1aa44897a07d937e0d5826c24439420ca5d8a63630655ce9161e58d286fc885fcd9b19d096080225d16c89939a24aa1e98632d497b5604073b13f65bdfddc1de4b40d2a829b0521010c5f0f241b1ccc759049579db79983434fac2748829b33f001d0020a8e86c9d3958e0257c867e59c8082238a1ea0a9f2cac9e41f9b3cb0294f34b484a4a000100002900eb00c600c0afc8dade37ae62fa550c8aa50660d8e73585636748040b8e01d67161878276b1ec1ee2aff7614889bb6a36d2bdf9ca097ff6d7bf05c4de1d65c2b8db641f1c8dfbd59c9f7e0fed0b8e0394567eda55173d198e9ca40883b291ab4cada1a91ca8306ca1c37e047ebfe12b95164219b06a24711c2182f5e37374d43c668d45a3ca05eda90e90e510e628b4cfa7ae880502dae9a70a8eced26ad4b3c2f05d77f136cfaa622e40eb084dd3eb52e23a9aeff6ae9018100af38acfd1f6ce5d8c53c4a61c547258002120fe93e5c7a5c9c1a04bf06858c4dd52b01875844e15582dd566d03f41133183a0';
+    return new Uint8Array(hexStr.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+}
+
+async function 带超时连接({ hostname, port }, 超时时间) {
+    const TCP接口 = connect({ hostname, port });
+    try {
+        await Promise.race([
+            TCP接口.opened,
+            new Promise((_, reject) =>
+                setTimeout(() => reject(new Error("连接超时")), 超时时间)
+            ),
+        ]);
+        return TCP接口; // ✅ 连接成功
+    } catch (err) {
+        TCP接口.close?.(); // 确保连接关闭
+        throw err; // ⛔ 抛出错误由调用者处理
+    }
+}
+
+function 带超时读取(reader, 超时) {
+    return new Promise(resolve => {
+        const timeoutId = setTimeout(() => resolve({ done: true, value: null, 超时: true }), 超时);
+        reader.read().then(result => {
+            clearTimeout(timeoutId);
+            resolve({ ...result, 超时: false });
+        });
+    });
+}
+
 export default {
     async fetch(request, env, ctx) {
         try {
@@ -1175,6 +1297,11 @@ export default {
         piu = getConfigValue('yxURL', env.yxURL || env.YXURL) || 'https://raw.githubusercontent.com/qwer-search/bestip/refs/heads/main/kejilandbestip.txt';
         
         cp = getConfigValue('d', env.d || env.D) || '';
+        
+        // 调试日志：记录请求信息
+        console.log('[请求开始] URL:', url.pathname);
+        console.log('[请求开始] 自定义路径(cp):', cp);
+        console.log('[请求开始] UUID(at):', at);
         
             const defaultURL = 'https://raw.githubusercontent.com/qwer-search/bestip/refs/heads/main/kejilandbestip.txt';
         if (piu !== defaultURL) {
@@ -2677,12 +2804,28 @@ async function handleUploadFileAPI(request) {
             });
             
             const input = document.getElementById('uuidInput');
-            input.focus();
-            input.addEventListener('keypress', function(e) {
-                if (e.key === 'Enter') {
-                    handleUUIDInput();
-                }
-            });
+            if (input) {
+                input.focus();
+                // U变量输入框的回车事件处理，确保只影响uuidInput，不影响代理访问等其他功能
+                // 使用更严格的事件隔离机制
+                input.addEventListener('keypress', function(e) {
+                    if (e.key === 'Enter' || e.keyCode === 13) {
+                        // 检查当前焦点是否在uuidInput上，确保不会误触发
+                        if (document.activeElement !== input) {
+                            return; // 如果焦点不在uuidInput上，不处理
+                        }
+                        e.preventDefault();
+                        e.stopPropagation(); // 阻止事件冒泡
+                        e.stopImmediatePropagation(); // 阻止同一元素上的其他监听器
+                        handleUUIDInput();
+                    }
+                }, false); // 使用bubble阶段，避免与代理访问冲突
+                
+                // 确保输入框获得焦点时不会影响其他功能
+                input.addEventListener('focus', function(e) {
+                    e.stopPropagation();
+                }, false);
+            }
             
             // 更换背景按钮功能
             const changeBeautyBackgroundBtn = document.getElementById('changeBeautyBackgroundBtn');
@@ -2841,22 +2984,111 @@ async function handleUploadFileAPI(request) {
                     return new Response(terminalHtml, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
                 }
             
+        console.log('[路径检查] 开始检查路径，cp值:', cp);
         if (cp && cp.trim()) {
-            const cleanCustomPath = cp.trim().startsWith('/') ? cp.trim() : '/' + cp.trim();
-            const normalizedCustomPath = cleanCustomPath.endsWith('/') && cleanCustomPath.length > 1 ? cleanCustomPath.slice(0, -1) : cleanCustomPath;
+            console.log('[路径检查] 进入自定义路径模式');
+            const cleanCustomPath = cp.trim().startsWith('/') ? cp.trim().substring(1) : cp.trim();
             const normalizedPath = url.pathname.endsWith('/') && url.pathname.length > 1 ? url.pathname.slice(0, -1) : url.pathname;
+            const pathParts = normalizedPath.substring(1).split('/');
+            
+            // 调试日志：记录路径信息
+            console.log('[代理访问调试] 自定义路径模式');
+            console.log('[代理访问调试] cleanCustomPath:', cleanCustomPath);
+            console.log('[代理访问调试] normalizedPath:', normalizedPath);
+            console.log('[代理访问调试] pathParts:', JSON.stringify(pathParts));
+            console.log('[代理访问调试] pathParts.length:', pathParts.length);
+            
+            // 检查路径格式：/{UUID}/{自定义路径} 或 /{UUID}/{自定义路径}/...
+            if (pathParts.length >= 2) {
+                const firstPart = pathParts[0];
+                const secondPart = pathParts[1];
                 
-                if (normalizedPath === normalizedCustomPath) {
-                    return await handleSubscriptionPage(request, at);
-                }
-                
-                if (normalizedPath === normalizedCustomPath + '/sub') {
-                    return await handleSubscriptionRequest(request, at, url);
-                }
-                
-                if (url.pathname.length > 1 && url.pathname !== '/') {
-                    const user = url.pathname.replace(/\/$/, '').replace('/sub', '').substring(1);
-                    if (isValidFormat(user)) {
+                // 如果第一部分是UUID，第二部分是自定义路径
+                if (isValidFormat(firstPart) && secondPart === cleanCustomPath) {
+                    console.log('[代理访问调试] 路径格式匹配: UUID=' + firstPart + ', 自定义路径=' + secondPart);
+                    // 如果UUID是正确的，允许访问
+                    if (firstPart === at) {
+                        console.log('[代理访问调试] UUID正确，pathParts.length=' + pathParts.length);
+                        // 检查是否是订阅请求
+                        if (pathParts.length === 3 && pathParts[2] === 'sub') {
+                            return await handleSubscriptionRequest(request, at, url);
+                        } else if (pathParts.length === 2) {
+                            // 路径格式：/{UUID}/{自定义路径}，返回订阅页面
+                            return await handleSubscriptionPage(request, at);
+                        } else if (pathParts.length > 2) {
+                            // 路径格式：/{UUID}/{自定义路径}/代理目标，让后续代码处理代理访问
+                            console.log('[代理访问调试] 路径格式正确，继续执行到代理访问处理逻辑');
+                            // 不返回，继续执行到代理访问处理逻辑
+                        }
+                    } else {
+                        console.log('[代理访问调试] UUID不正确，但路径格式正确，允许作为代理访问');
+                        // UUID不正确，但路径格式正确，允许作为代理访问
+                        // 不返回，继续执行到代理访问处理逻辑
+                    }
+                } else {
+                    console.log('[代理访问调试] 路径格式不匹配: firstPart=' + firstPart + ', secondPart=' + secondPart + ', cleanCustomPath=' + cleanCustomPath);
+                    // 路径格式不符合 /{UUID}/{自定义路径} 格式
+                    // 检查是否是只有UUID，没有自定义路径
+                    if (pathParts.length === 1 && isValidFormat(pathParts[0])) {
+                        // 检查是否在禁止期内
+                        const protectionCheck = checkBruteForceProtection(request);
+                        if (protectionCheck && protectionCheck.blocked) {
+                            return new Response(JSON.stringify({ 
+                                error: '超过三次没有30分钟后再尝试，禁止暴力尝试',
+                                message: '请等待 ' + protectionCheck.remainingMinutes + ' 分钟后再试'
+                            }), { 
+                                status: 403,
+                                headers: { 'Content-Type': 'application/json' }
+                            });
+                        }
+                        
+                        // 记录失败尝试
+                        const attemptResult = recordFailedAttempt(request);
+                        if (attemptResult.blocked) {
+                            return new Response(JSON.stringify({ 
+                                error: attemptResult.message,
+                                message: '请等待 30 分钟后再试'
+                            }), { 
+                                status: 403,
+                                headers: { 'Content-Type': 'application/json' }
+                            });
+                        }
+                        
+                        return new Response(JSON.stringify({ 
+                            error: '访问被拒绝',
+                            message: '当前 Worker 已启用自定义路径模式，UUID 访问已禁用'
+                        }), { 
+                            status: 403,
+                            headers: { 'Content-Type': 'application/json' }
+                        });
+                    }
+                    
+                    // 如果路径是/{UUID}/...格式，但第二部分不是自定义路径
+                    if (pathParts.length >= 2 && isValidFormat(pathParts[0]) && pathParts[1] !== cleanCustomPath) {
+                        // 检查是否在禁止期内
+                        const protectionCheck = checkBruteForceProtection(request);
+                        if (protectionCheck && protectionCheck.blocked) {
+                            return new Response(JSON.stringify({ 
+                                error: '超过三次没有30分钟后再尝试，禁止暴力尝试',
+                                message: '请等待 ' + protectionCheck.remainingMinutes + ' 分钟后再试'
+                            }), { 
+                                status: 403,
+                                headers: { 'Content-Type': 'application/json' }
+                            });
+                        }
+                        
+                        // 记录失败尝试
+                        const attemptResult = recordFailedAttempt(request);
+                        if (attemptResult.blocked) {
+                            return new Response(JSON.stringify({ 
+                                error: attemptResult.message,
+                                message: '请等待 30 分钟后再试'
+                            }), { 
+                                status: 403,
+                                headers: { 'Content-Type': 'application/json' }
+                            });
+                        }
+                        
                         return new Response(JSON.stringify({ 
                             error: '访问被拒绝',
                             message: '当前 Worker 已启用自定义路径模式，UUID 访问已禁用'
@@ -2866,14 +3098,104 @@ async function handleUploadFileAPI(request) {
                         });
                     }
                 }
+            } else if (pathParts.length === 1 && isValidFormat(pathParts[0])) {
+                // 只有UUID，没有自定义路径
+                // 检查是否在禁止期内
+                const protectionCheck = checkBruteForceProtection(request);
+                if (protectionCheck && protectionCheck.blocked) {
+                    return new Response(JSON.stringify({ 
+                        error: '超过三次没有30分钟后再尝试，禁止暴力尝试',
+                        message: '请等待 ' + protectionCheck.remainingMinutes + ' 分钟后再试'
+                    }), { 
+                        status: 403,
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+                }
+                
+                // 记录失败尝试
+                const attemptResult = recordFailedAttempt(request);
+                if (attemptResult.blocked) {
+                    return new Response(JSON.stringify({ 
+                        error: attemptResult.message,
+                        message: '请等待 30 分钟后再试'
+                    }), { 
+                        status: 403,
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+                }
+                
+                return new Response(JSON.stringify({ 
+                    error: '访问被拒绝',
+                    message: '当前 Worker 已启用自定义路径模式，UUID 访问已禁用'
+                }), { 
+                    status: 403,
+                    headers: { 'Content-Type': 'application/json' }
+                });
+            }
+            
+            // 兼容旧格式：直接访问自定义路径（不带UUID）
+            const cleanCustomPathWithSlash = '/' + cleanCustomPath;
+            if (normalizedPath === cleanCustomPathWithSlash) {
+                return await handleSubscriptionPage(request, at);
+            }
+            
+            if (normalizedPath === cleanCustomPathWithSlash + '/sub') {
+                return await handleSubscriptionRequest(request, at, url);
+            }
             } else {
+                console.log('[路径检查] 进入非自定义路径模式');
                 
                 if (url.pathname.length > 1 && url.pathname !== '/' && !url.pathname.includes('/sub')) {
-                    const user = url.pathname.replace(/\/$/, '').substring(1);
-                    if (isValidFormat(user)) {
-                        if (user === at) {
-                            return await handleSubscriptionPage(request, user);
+                    const pathParts = url.pathname.replace(/\/$/, '').substring(1).split('/');
+                    const firstPart = pathParts[0];
+                    
+                    console.log('[路径检查] pathParts:', JSON.stringify(pathParts));
+                    console.log('[路径检查] firstPart:', firstPart);
+                    console.log('[路径检查] at:', at);
+                    console.log('[路径检查] isValidFormat(firstPart):', isValidFormat(firstPart));
+                    
+                    // 检查路径格式：/{UUID} 或 /{UUID}/代理目标
+                    if (isValidFormat(firstPart)) {
+                        console.log('[路径检查] UUID格式有效');
+                        if (firstPart === at) {
+                            console.log('[路径检查] UUID正确，pathParts.length:', pathParts.length);
+                            // 成功访问，清除失败记录
+                            clearFailedAttempts(request);
+                            
+                            // 如果路径只有UUID，返回订阅页面
+                            if (pathParts.length === 1) {
+                                console.log('[路径检查] 返回订阅页面');
+                                return await handleSubscriptionPage(request, firstPart);
+                            }
+                            // 如果路径是 /{UUID}/代理目标，让后续代码处理代理访问
+                            console.log('[路径检查] 继续执行到代理访问处理逻辑');
+                            // 不返回，继续执行到代理访问处理逻辑
                         } else {
+                            console.log('[路径检查] UUID不正确');
+                            // 检查是否在禁止期内
+                            const protectionCheck = checkBruteForceProtection(request);
+                            if (protectionCheck && protectionCheck.blocked) {
+                                return new Response(JSON.stringify({ 
+                                    error: '超过三次没有30分钟后再尝试，禁止暴力尝试',
+                                    message: '请等待 ' + protectionCheck.remainingMinutes + ' 分钟后再试'
+                                }), { 
+                                    status: 403,
+                                    headers: { 'Content-Type': 'application/json' }
+                                });
+                            }
+                            
+                            // 记录失败尝试
+                            const attemptResult = recordFailedAttempt(request);
+                            if (attemptResult.blocked) {
+                                return new Response(JSON.stringify({ 
+                                    error: attemptResult.message,
+                                    message: '请等待 30 分钟后再试'
+                                }), { 
+                                    status: 403,
+                                    headers: { 'Content-Type': 'application/json' }
+                                });
+                            }
+                            
                             return new Response(JSON.stringify({ error: 'UUID错误 请注意变量名称是u不是uuid' }), { 
                                 status: 403,
                                 headers: { 'Content-Type': 'application/json' }
@@ -2884,11 +3206,49 @@ async function handleUploadFileAPI(request) {
                 if (url.pathname.includes('/sub')) {
                     const pathParts = url.pathname.split('/');
                     if (pathParts.length === 2 && pathParts[1] === 'sub') {
-                        const user = pathParts[0].substring(1);
+                        const pathSegment = pathParts[0].substring(1);
+                        // 验证路径段必须是纯UUID格式，不能包含额外字符
+                        if (!isValidFormat(pathSegment)) {
+                            // 路径格式无效（可能包含额外字符，如 59de3aec-4833-48e4-9e29-9a579fef60cb3232）
+                            return new Response(JSON.stringify({ 
+                                error: '访问被拒绝',
+                                message: '路径格式错误，必须通过正确的登录路径才能生成订阅链接'
+                            }), { 
+                                status: 403,
+                                headers: { 'Content-Type': 'application/json' }
+                            });
+                        }
+                        const user = pathSegment;
                         if (isValidFormat(user)) {
                             if (user === at) {
+                                // 成功访问，清除失败记录
+                                clearFailedAttempts(request);
                                 return await handleSubscriptionRequest(request, user, url);
                             } else {
+                                // 检查是否在禁止期内
+                                const protectionCheck = checkBruteForceProtection(request);
+                                if (protectionCheck && protectionCheck.blocked) {
+                                    return new Response(JSON.stringify({ 
+                                        error: '超过三次没有30分钟后再尝试，禁止暴力尝试',
+                                        message: '请等待 ' + protectionCheck.remainingMinutes + ' 分钟后再试'
+                                    }), { 
+                                        status: 403,
+                                        headers: { 'Content-Type': 'application/json' }
+                                    });
+                                }
+                                
+                                // 记录失败尝试
+                                const attemptResult = recordFailedAttempt(request);
+                                if (attemptResult.blocked) {
+                                    return new Response(JSON.stringify({ 
+                                        error: attemptResult.message,
+                                        message: '请等待 30 分钟后再试'
+                                    }), { 
+                                        status: 403,
+                                        headers: { 'Content-Type': 'application/json' }
+                                    });
+                                }
+                                
                                 return new Response(JSON.stringify({ error: 'UUID错误' }), { 
                                     status: 403,
                                     headers: { 'Content-Type': 'application/json' }
@@ -2898,7 +3258,11 @@ async function handleUploadFileAPI(request) {
                         }
                     }
                 }
-                if (url.pathname.toLowerCase().includes(`/${subPath}`)) {
+                // 检查是否是订阅路径，但需要排除 /{UUID}/代理目标 格式的路径
+                const pathForSubCheck = url.pathname.toLowerCase();
+                // 只有当路径正好是 /{subPath} 或 /{subPath}/sub 时才返回订阅请求
+                // 排除 /{UUID}/代理目标 格式的路径
+                if (pathForSubCheck === `/${subPath}` || pathForSubCheck === `/${subPath}/sub`) {
                     return await handleSubscriptionRequest(request, at);
                 }
             }
@@ -2910,29 +3274,70 @@ async function handleUploadFileAPI(request) {
                 const normalizedPath = url.pathname.endsWith('/') && url.pathname.length > 1 ? url.pathname.slice(0, -1) : url.pathname;
                 const cleanProxyPath = proxyPathPattern.startsWith('/') ? proxyPathPattern.substring(1) : proxyPathPattern;
                 
-                // 检查路径是否匹配代理路径模式（例如：/test/123）
-                if (normalizedPath.startsWith('/' + cleanProxyPath + '/')) {
-                    // 提取代理目标URL（路径中 /test/ 之后的部分）
-                    const targetPath = normalizedPath.substring(cleanProxyPath.length + 2); // +2 因为要去掉开头的 '/' 和 'test/'
-                    if (targetPath) {
-                        // 直接跳转到代理访问
-                        return await handleProxyRequest(request, new URL(url.origin + '/' + targetPath));
+                // 如果设置了自定义路径（cp），需要先验证UUID路径
+                if (cp && cp.trim()) {
+                    const cleanCustomPath = cp.trim().startsWith('/') ? cp.trim().substring(1) : cp.trim();
+                    // 检查路径格式：/{UUID}/{自定义路径}/{代理路径}/...
+                    // 例如：/59de3aec-4833-48e4-9e29-9a579fef60cb/mypath/test/123
+                    const pathParts = normalizedPath.substring(1).split('/');
+                    if (pathParts.length >= 2) {
+                        const firstPart = pathParts[0];
+                        const secondPart = pathParts[1];
+                        // 验证第一部分是UUID，第二部分是自定义路径
+                        if (isValidFormat(firstPart) && firstPart === at && secondPart === cleanCustomPath) {
+                            // 检查是否匹配代理路径模式（例如：/{UUID}/{自定义路径}/test/123）
+                            if (pathParts.length >= 3 && pathParts[2] === cleanProxyPath) {
+                                // 提取代理目标URL（路径中 /test/ 之后的部分）
+                                const targetPath = pathParts.slice(3).join('/');
+                                if (targetPath) {
+                                    // 构建代理目标URL
+                                    let targetUrl = targetPath;
+                                    // 如果目标路径不包含协议，添加 https://
+                                    if (!targetUrl.includes('://')) {
+                                        targetUrl = 'https://' + targetUrl;
+                                    }
+                                    // 直接跳转到代理访问
+                                    return await handleProxyRequest(request, new URL(targetUrl));
+                                }
+                            }
+                            // 如果路径正好是 /{UUID}/{自定义路径}/test，返回只显示代理访问功能的页面
+                            if (pathParts.length === 3 && pathParts[2] === cleanProxyPath) {
+                                return await handleProxyOnlyPage(request, url);
+                            }
+                        }
                     }
-                }
-                
-                // 如果路径正好是代理路径（如 /test），且不是订阅路径，返回只显示代理访问功能的页面
-                if (normalizedPath === '/' + cleanProxyPath) {
-                    // 确保不是订阅路径
-                    const isSubscriptionPath = (cp && cp.trim() && normalizedPath === '/' + (cp.trim().startsWith('/') ? cp.trim().substring(1) : cp.trim())) ||
-                                               (normalizedPath === '/' + at);
-                    if (!isSubscriptionPath) {
-                        return await handleProxyOnlyPage(request, url);
+                } else {
+                    // 自定义路径留空时，使用原有逻辑
+                    // 检查路径是否匹配代理路径模式（例如：/test/123）
+                    if (normalizedPath.startsWith('/' + cleanProxyPath + '/')) {
+                        // 提取代理目标URL（路径中 /test/ 之后的部分）
+                        const targetPath = normalizedPath.substring(cleanProxyPath.length + 2); // +2 因为要去掉开头的 '/' 和 'test/'
+                        if (targetPath) {
+                            // 构建代理目标URL
+                            let targetUrl = targetPath;
+                            // 如果目标路径不包含协议，添加 https://
+                            if (!targetUrl.includes('://')) {
+                                targetUrl = 'https://' + targetUrl;
+                            }
+                            // 直接跳转到代理访问
+                            return await handleProxyRequest(request, new URL(targetUrl));
+                        }
+                    }
+                    
+                    // 如果路径正好是代理路径（如 /test），且不是订阅路径，返回只显示代理访问功能的页面
+                    if (normalizedPath === '/' + cleanProxyPath) {
+                        // 确保不是订阅路径
+                        const isSubscriptionPath = (normalizedPath === '/' + at);
+                        if (!isSubscriptionPath) {
+                            return await handleProxyOnlyPage(request, url);
+                        }
                     }
                 }
             }
             
             // 检查是否是根路径下的直接代理路径（如 /111）
             // 如果路径不是订阅路径，也不是API路径，且不是根路径，则可能是代理路径
+            console.log('[代理访问检查] 开始检查根路径代理，url.pathname:', url.pathname);
             if (url.pathname.length > 1 && 
                 !url.pathname.includes('/api/') && 
                 !url.pathname.includes('/sub') &&
@@ -2944,22 +3349,135 @@ async function handleUploadFileAPI(request) {
                 !url.pathname.endsWith('/region') &&
                 !url.pathname.endsWith('/test-api') &&
                 !url.pathname.includes('/__test__')) {
+                console.log('[代理访问检查] 进入根路径代理检查');
                 // 检查是否是有效的代理路径（不是UUID格式，也不是已知的路径）
                 const pathSegment = url.pathname.substring(1).split('/')[0];
                 const normalizedPath = url.pathname.endsWith('/') && url.pathname.length > 1 ? url.pathname.slice(0, -1) : url.pathname;
+                console.log('[代理访问检查] pathSegment:', pathSegment, 'normalizedPath:', normalizedPath, 'cp:', cp);
                 
-                // 如果不是订阅路径，也不是UUID格式，则可能是代理路径
-                if (!isValidFormat(pathSegment) && 
-                    normalizedPath !== '/' + (cp || at) &&
-                    !normalizedPath.startsWith('/' + (cp || at) + '/')) {
-                    // 可能是代理路径，尝试作为代理请求处理
-                    const targetPath = url.pathname.substring(1);
-                    if (targetPath && !targetPath.includes('http://') && !targetPath.includes('https://')) {
-                        // 尝试作为代理请求处理
-                        try {
-                            return await handleProxyRequest(request, new URL(url.origin + '/' + targetPath));
-                        } catch (e) {
-                            // 如果失败，继续正常流程
+                // 如果设置了自定义路径（cp），需要先验证UUID路径
+                if (cp && cp.trim()) {
+                    const cleanCustomPath = cp.trim().startsWith('/') ? cp.trim().substring(1) : cp.trim();
+                    // 检查路径格式：/{UUID}/{自定义路径}/...
+                    // 例如：/59de3aec-4833-48e4-9e29-9a579fef60cb/mypath/123
+                    const pathParts = normalizedPath.substring(1).split('/');
+                    if (pathParts.length >= 2) {
+                        const firstPart = pathParts[0];
+                        const secondPart = pathParts[1];
+                        // 验证第一部分是UUID，第二部分是自定义路径
+                        if (isValidFormat(firstPart) && firstPart === at && secondPart === cleanCustomPath) {
+                            console.log('[代理访问调试] 根路径代理检查: UUID=' + firstPart + ', 自定义路径=' + secondPart);
+                            // 提取代理目标URL（路径中 /{UUID}/{自定义路径}/ 之后的部分）
+                            const targetPath = pathParts.slice(2).join('/');
+                            console.log('[代理访问调试] 提取的代理目标: ' + targetPath);
+                            if (targetPath && !targetPath.includes('http://') && !targetPath.includes('https://')) {
+                                console.log('[代理访问调试] 开始代理访问: ' + targetPath);
+                                // 构建代理目标URL
+                                let targetUrl = targetPath;
+                                // 如果目标路径不包含协议，添加 https://
+                                if (!targetUrl.includes('://')) {
+                                    targetUrl = 'https://' + targetUrl;
+                                }
+                                console.log('[代理访问调试] 构建的目标URL: ' + targetUrl);
+                                // 验证URL是否有效（必须包含点号，表示是域名）
+                                try {
+                                    const testUrl = new URL(targetUrl);
+                                    if (!testUrl.host.includes(".")) {
+                                        // 无效的URL格式，显示代理访问页面
+                                        console.log('[代理访问调试] URL格式无效，显示代理访问页面');
+                                        return await handleProxyOnlyPage(request, url);
+                                    }
+                                    // URL有效，尝试作为代理请求处理
+                                    return await handleProxyRequest(request, testUrl);
+                                } catch (e) {
+                                    console.log('[代理访问调试] URL解析失败，显示代理访问页面: ' + e.message);
+                                    // URL无效，显示代理访问页面
+                                    return await handleProxyOnlyPage(request, url);
+                                }
+                            } else {
+                                console.log('[代理访问调试] 代理目标无效或包含http/https');
+                            }
+                        } else {
+                            console.log('[代理访问调试] 根路径代理检查失败: firstPart=' + firstPart + ', secondPart=' + secondPart + ', cleanCustomPath=' + cleanCustomPath);
+                        }
+                    }
+                } else {
+                    console.log('[代理访问] 自定义路径留空，使用原有逻辑');
+                    // 自定义路径留空时，使用原有逻辑
+                    // 检查路径格式：/{UUID}/代理目标
+                    const pathParts = normalizedPath.substring(1).split('/');
+                    console.log('[代理访问] normalizedPath:', normalizedPath);
+                    console.log('[代理访问] pathParts:', JSON.stringify(pathParts));
+                    if (pathParts.length >= 2) {
+                        const firstPart = pathParts[0];
+                        console.log('[代理访问] firstPart:', firstPart, 'at:', at);
+                        console.log('[代理访问] isValidFormat(firstPart):', isValidFormat(firstPart));
+                        // 如果第一部分是UUID，且UUID是正确的
+                        if (isValidFormat(firstPart) && firstPart === at) {
+                            console.log('[代理访问] UUID正确，提取代理目标');
+                            // 提取代理目标URL（路径中 /{UUID}/ 之后的部分）
+                            const targetPath = pathParts.slice(1).join('/');
+                            console.log('[代理访问] targetPath:', targetPath);
+                            if (targetPath && !targetPath.includes('http://') && !targetPath.includes('https://')) {
+                                console.log('[代理访问] 开始代理请求处理');
+                                // 验证目标URL是否有效
+                                let targetUrl = targetPath;
+                                // 如果目标路径不包含协议，添加 https://
+                                if (!targetUrl.includes('://')) {
+                                    targetUrl = 'https://' + targetUrl;
+                                }
+                                console.log('[代理访问] 构建的目标URL:', targetUrl);
+                                // 验证URL是否有效（必须包含点号，表示是域名）
+                                try {
+                                    const testUrl = new URL(targetUrl);
+                                    if (!testUrl.host.includes(".")) {
+                                        // 无效的URL格式，显示代理访问页面
+                                        console.log('[代理访问] URL格式无效，显示代理访问页面');
+                                        return await handleProxyOnlyPage(request, url);
+                                    }
+                                    // URL有效，尝试作为代理请求处理
+                                    return await handleProxyRequest(request, testUrl);
+                                } catch (e) {
+                                    console.log('[代理访问] URL解析失败，显示代理访问页面:', e.message);
+                                    // URL无效，显示代理访问页面
+                                    return await handleProxyOnlyPage(request, url);
+                                }
+                            } else {
+                                console.log('[代理访问] 代理目标无效');
+                            }
+                        } else {
+                            console.log('[代理访问] UUID验证失败');
+                        }
+                    } else {
+                        console.log('[代理访问] pathParts.length < 2');
+                    }
+                    
+                    // 如果不是订阅路径，也不是UUID格式，则可能是代理路径
+                    if (!isValidFormat(pathSegment) && 
+                        normalizedPath !== '/' + at &&
+                        !normalizedPath.startsWith('/' + at + '/')) {
+                        // 可能是代理路径，尝试作为代理请求处理
+                        const targetPath = url.pathname.substring(1);
+                        if (targetPath && !targetPath.includes('http://') && !targetPath.includes('https://')) {
+                            // 构建代理目标URL
+                            let targetUrl = targetPath;
+                            // 如果目标路径不包含协议，添加 https://
+                            if (!targetUrl.includes('://')) {
+                                targetUrl = 'https://' + targetUrl;
+                            }
+                            // 验证URL是否有效（必须包含点号，表示是域名）
+                            try {
+                                const testUrl = new URL(targetUrl);
+                                if (!testUrl.host.includes(".")) {
+                                    // 无效的URL格式，显示代理访问页面
+                                    return await handleProxyOnlyPage(request, url);
+                                }
+                                // URL有效，尝试作为代理请求处理
+                                return await handleProxyRequest(request, testUrl);
+                            } catch (e) {
+                                // URL无效，显示代理访问页面
+                                return await handleProxyOnlyPage(request, url);
+                            }
                         }
                     }
                 }
@@ -3024,6 +3542,64 @@ function detectClientType(userAgent, target) {
     if (ua.includes('sing-box')) return 'SING-BOX';
     
     return '未知客户端';
+}
+
+// 检查是否在禁止期内（防止暴力尝试）
+function checkBruteForceProtection(request) {
+    const clientIP = request.headers.get('CF-Connecting-IP') || 
+                   request.cf?.clientIp || 
+                   'unknown';
+    
+    const protection = bruteForceProtection.get(clientIP);
+    if (protection) {
+        const now = Date.now();
+        // 如果禁止期已过，清除记录
+        if (now >= protection.blockUntil) {
+            bruteForceProtection.delete(clientIP);
+            return null;
+        }
+        // 仍在禁止期内
+        const remainingMinutes = Math.ceil((protection.blockUntil - now) / (1000 * 60));
+        return {
+            blocked: true,
+            remainingMinutes: remainingMinutes
+        };
+    }
+    return null;
+}
+
+// 记录失败尝试
+function recordFailedAttempt(request) {
+    const clientIP = request.headers.get('CF-Connecting-IP') || 
+                   request.cf?.clientIp || 
+                   'unknown';
+    
+    const protection = bruteForceProtection.get(clientIP) || { failCount: 0 };
+    protection.failCount++;
+    
+    // 如果连续三次失败，设置30分钟禁止期
+    if (protection.failCount >= 3) {
+        protection.blockUntil = Date.now() + (30 * 60 * 1000); // 30分钟后
+        bruteForceProtection.set(clientIP, protection);
+        return {
+            blocked: true,
+            message: '超过三次没有30分钟后再尝试，禁止暴力尝试'
+        };
+    } else {
+        bruteForceProtection.set(clientIP, protection);
+        return {
+            blocked: false,
+            remainingAttempts: 3 - protection.failCount
+        };
+    }
+}
+
+// 清除失败记录（成功时调用）
+function clearFailedAttempts(request) {
+    const clientIP = request.headers.get('CF-Connecting-IP') || 
+                   request.cf?.clientIp || 
+                   'unknown';
+    bruteForceProtection.delete(clientIP);
 }
 
 // 记录订阅使用信息
@@ -3135,6 +3711,271 @@ async function recordSubscriptionUsage(request, target) {
     }
 }
 
+// 检查是否为私有IP地址
+function isPrivateIP(ip) {
+    if (!ip) return true;
+    
+    // IPv4私有地址
+    if (ip.startsWith('127.') || ip.startsWith('192.168.') || ip.startsWith('10.') || 
+        ip.startsWith('172.16.') || ip.startsWith('172.17.') || ip.startsWith('172.18.') || 
+        ip.startsWith('172.19.') || ip.startsWith('172.20.') || ip.startsWith('172.21.') || 
+        ip.startsWith('172.22.') || ip.startsWith('172.23.') || ip.startsWith('172.24.') || 
+        ip.startsWith('172.25.') || ip.startsWith('172.26.') || ip.startsWith('172.27.') || 
+        ip.startsWith('172.28.') || ip.startsWith('172.29.') || ip.startsWith('172.30.') || 
+        ip.startsWith('172.31.') || ip === 'localhost') {
+        return true;
+    }
+    
+    // IPv6私有地址和本地地址
+    if (ip.includes(':')) {
+        // IPv6 localhost
+        if (ip === '::1' || ip === '::' || ip.toLowerCase() === 'localhost') {
+            return true;
+        }
+        // IPv6私有地址范围: fc00::/7, fe80::/10
+        if (ip.toLowerCase().startsWith('fc') || ip.toLowerCase().startsWith('fd') || 
+            ip.toLowerCase().startsWith('fe80') || ip.toLowerCase().startsWith('fe9') || 
+            ip.toLowerCase().startsWith('fea') || ip.toLowerCase().startsWith('feb')) {
+            return true;
+        }
+        // IPv6链路本地地址
+        if (ip.toLowerCase().startsWith('fe80:')) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+// 获取IP地理位置信息
+async function getIPLocation(ip) {
+    // 跳过私有IP和本地IP
+    if (isPrivateIP(ip)) {
+        return null;
+    }
+    
+    // 验证IP格式（支持IPv4和IPv6）
+    if (!isValidIP(ip)) {
+        return null;
+    }
+    
+    try {
+        const isIPv6 = ip.includes(':');
+        
+        // 对于IPv6地址，某些API可以直接使用，某些需要编码
+        // 大多数API可以直接使用IPv6地址（浏览器会自动处理URL中的IPv6地址）
+        // 但为了兼容性，我们同时准备编码和非编码版本
+        const apiIP = ip; // 直接使用IP地址（对于IPv6，浏览器会自动处理）
+        const encodedIP = encodeURIComponent(ip); // 编码版本作为备用
+        
+        // 使用多个API作为备用，提高成功率
+        const apis = [
+            // API 1: ping0.cc (优先使用，支持IPv4和IPv6，中文数据)
+            async () => {
+                try {
+                    // ping0.cc API，支持IPv4和IPv6
+                    // 尝试多个可能的API端点
+                    const ping0Endpoints = [
+                        `https://ip.ping0.cc/ip/${apiIP}`,
+                        `https://api.ping0.cc/ip/${apiIP}`,
+                        `https://ping0.cc/api/ip/${apiIP}`
+                    ];
+                    
+                    for (const endpoint of ping0Endpoints) {
+                        try {
+                            const controller = new AbortController();
+                            const timeoutId = setTimeout(() => controller.abort(), 5000);
+                            
+                            const response = await fetch(endpoint, {
+                                headers: {
+                                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                                    'Accept': 'application/json'
+                                },
+                                signal: controller.signal
+                            });
+                            
+                            clearTimeout(timeoutId);
+                            
+                            if (response.ok) {
+                                const data = await response.json();
+                                // ping0.cc 可能返回的格式有多种，兼容处理
+                                if (data && (data.country || data.region || data.city || data.country_name || data.province)) {
+                                    return {
+                                        country: data.country || data.country_name || data.countryName || '',
+                                        countryCode: data.country_code || data.countryCode || '',
+                                        region: data.region || data.province || data.region_name || data.regionName || '',
+                                        city: data.city || data.city_name || data.cityName || '',
+                                        district: data.district || data.area || data.district_name || '',
+                                        isp: data.isp || data.isp_name || data.ispName || data.org || data.organization || '',
+                                        org: data.org || data.organization || data.orgName || ''
+                                    };
+                                }
+                            }
+                        } catch (endpointError) {
+                            // 继续尝试下一个端点
+                            continue;
+                        }
+                    }
+                } catch (e) {
+                    // 忽略错误，继续尝试下一个API
+                }
+                return null;
+            },
+            // API 2: ip-api.com (备用，免费，支持中文和IPv6，45次/分钟限制)
+            async () => {
+                try {
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 5000);
+                    // ip-api.com支持IPv6，可以直接使用IPv6地址（不编码）
+                    const apiUrl = `https://ip-api.com/json/${apiIP}?lang=zh-CN&fields=status,message,country,countryCode,region,regionName,city,district,isp,org`;
+                    const response = await fetch(apiUrl, {
+                        headers: {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                        },
+                        signal: controller.signal
+                    });
+                    clearTimeout(timeoutId);
+                    
+                    if (response.ok) {
+                        const data = await response.json();
+                        if (data.status === 'success') {
+                            return {
+                                country: data.country || '',
+                                countryCode: data.countryCode || '',
+                                region: data.regionName || data.region || '',
+                                city: data.city || '',
+                                district: data.district || '',
+                                isp: data.isp || '',
+                                org: data.org || ''
+                            };
+                        }
+                    }
+                } catch (e) {
+                    // 忽略错误，继续尝试下一个API
+                }
+                return null;
+            },
+            // API 2: ipapi.co (备用，免费版每天1000次，支持IPv6)
+            async () => {
+                try {
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 5000);
+                    // ipapi.co支持IPv6，对于IPv6地址需要直接使用（不编码）
+                    const ipapiIP = isIPv6 ? ip : encodedIP;
+                    const response = await fetch(`https://ipapi.co/${ipapiIP}/json/`, {
+                        headers: {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                        },
+                        signal: controller.signal
+                    });
+                    clearTimeout(timeoutId);
+                    
+                    if (response.ok) {
+                        const data = await response.json();
+                        if (!data.error && data.country_name) {
+                            return {
+                                country: data.country_name || data.country || '',
+                                countryCode: data.country_code || '',
+                                region: data.region || data.region_code || '',
+                                city: data.city || '',
+                                district: data.district || '',
+                                isp: data.org || data.isp || '',
+                                org: data.org || ''
+                            };
+                        }
+                    }
+                } catch (e) {
+                    // 忽略错误
+                }
+                return null;
+            },
+            // API 3: ipwhois.app (备用，免费，支持IPv6)
+            async () => {
+                try {
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 5000);
+                    // ipwhois.app支持IPv6，直接使用IP地址
+                    const response = await fetch(`https://ipwhois.app/json/${apiIP}`, {
+                        headers: {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                        },
+                        signal: controller.signal
+                    });
+                    clearTimeout(timeoutId);
+                    
+                    if (response.ok) {
+                        const data = await response.json();
+                        if (data.success && data.country) {
+                            return {
+                                country: data.country || '',
+                                countryCode: data.country_code || '',
+                                region: data.region || data.region_name || '',
+                                city: data.city || '',
+                                district: data.district || '',
+                                isp: data.isp || data.org || '',
+                                org: data.org || ''
+                            };
+                        }
+                    }
+                } catch (e) {
+                    // 忽略错误
+                }
+                return null;
+            },
+            // API 4: ip-api.io (备用，支持IPv6)
+            async () => {
+                try {
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), 5000);
+                    // ip-api.io支持IPv6
+                    const response = await fetch(`https://ip-api.io/json/${apiIP}`, {
+                        headers: {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                        },
+                        signal: controller.signal
+                    });
+                    clearTimeout(timeoutId);
+                    
+                    if (response.ok) {
+                        const data = await response.json();
+                        if (data.country_name) {
+                            return {
+                                country: data.country_name || '',
+                                countryCode: data.country_code || '',
+                                region: data.region_name || data.region || '',
+                                city: data.city || '',
+                                district: data.district || '',
+                                isp: data.isp || data.organization || '',
+                                org: data.organization || ''
+                            };
+                        }
+                    }
+                } catch (e) {
+                    // 忽略错误
+                }
+                return null;
+            }
+        ];
+        
+        // 依次尝试各个API，直到成功
+        for (let i = 0; i < apis.length; i++) {
+            const result = await apis[i]();
+            if (result) {
+                return result;
+            }
+            // 如果失败，等待一小段时间再尝试下一个（避免API限制）
+            if (i < apis.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, 300));
+            }
+        }
+        
+        return null;
+    } catch (error) {
+        // 静默失败，返回null
+        return null;
+    }
+}
+
 // 获取订阅使用统计
 async function getSubscriptionStats() {
     if (!kvStore) {
@@ -3177,8 +4018,47 @@ async function getSubscriptionStats() {
         // 按最后访问时间排序（最新的在前）
         clients.sort((a, b) => b.lastAccess - a.lastAccess);
         
-        // 计算唯一IP数量（不同IP的使用者数量）
+        // 为每个客户端IP查询地理位置信息（使用缓存避免重复查询）
         const uniqueIPs = new Set(clients.map(c => c.ip));
+        const locationMap = {};
+        
+        // 限制并发查询数量，避免API限制（每次最多3个并发，降低API限制风险）
+        const batchSize = 3;
+        const ipArray = Array.from(uniqueIPs);
+        
+        // 如果IP数量较多，只查询前20个最新的IP（避免超时）
+        const ipArrayToQuery = ipArray.slice(0, 20);
+        
+        for (let i = 0; i < ipArrayToQuery.length; i += batchSize) {
+            const batch = ipArrayToQuery.slice(i, i + batchSize);
+            const batchPromises = batch.map(async (ip) => {
+                if (!locationMap[ip]) {
+                    locationMap[ip] = await getIPLocation(ip);
+                }
+                return { ip, location: locationMap[ip] };
+            });
+            
+            await Promise.all(batchPromises);
+            
+            // 批次之间添加延迟，避免触发API速率限制
+            if (i + batchSize < ipArrayToQuery.length) {
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+        }
+        
+        // 对于未查询的IP，设置为null
+        ipArray.forEach(ip => {
+            if (!locationMap[ip]) {
+                locationMap[ip] = null;
+            }
+        });
+        
+        // 为每个客户端添加地理位置信息
+        clients.forEach(client => {
+            client.location = locationMap[client.ip] || null;
+        });
+        
+        // 计算唯一IP数量（不同IP的使用者数量）
         
         return {
             totalUsers: clients.length, // 总记录数（IP+客户端类型组合）
@@ -3196,6 +4076,48 @@ async function getSubscriptionStats() {
 
 async function handleSubscriptionRequest(request, user, url = null) {
     if (!url) url = new URL(request.url);
+    
+    // 验证：只有完全匹配正确UUID的路径才能生成订阅
+    // 禁止包含额外字符的路径（如 59de3aec-4833-48e4-9e29-9a579fef60cb3232）
+    if (!user || !isValidFormat(user) || user !== at) {
+        return new Response(JSON.stringify({ 
+            error: '访问被拒绝',
+            message: '必须通过正确的登录路径才能生成订阅链接'
+        }), { 
+            status: 403,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+    
+    // 额外验证：检查URL路径是否包含额外字符
+    let pathSegment = url.pathname.replace(/\/$/, '');
+    // 如果是订阅路径，提取UUID部分
+    if (pathSegment.endsWith('/sub')) {
+        pathSegment = pathSegment.replace('/sub', '').substring(1);
+    } else {
+        pathSegment = pathSegment.substring(1);
+    }
+    // 验证路径段必须是纯UUID，不能包含额外字符
+    if (pathSegment && pathSegment !== user) {
+        // 如果路径段与用户UUID不匹配，说明路径包含额外字符
+        return new Response(JSON.stringify({ 
+            error: '访问被拒绝',
+            message: '路径格式错误，必须通过正确的登录路径才能生成订阅链接'
+        }), { 
+            status: 403,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+    // 再次验证路径段必须是有效的UUID格式
+    if (pathSegment && !isValidFormat(pathSegment)) {
+        return new Response(JSON.stringify({ 
+            error: '访问被拒绝',
+            message: '路径格式错误，必须通过正确的登录路径才能生成订阅链接'
+        }), { 
+            status: 403,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
     
     const finalLinks = [];
     const workerDomain = url.hostname;
@@ -4048,6 +4970,9 @@ async function handleSubscriptionPage(request, user = null) {
                 customProxyPath: '自定义代理路径 (PROXY_PATH):',
                 customProxyPathPlaceholder: '例如: test',
                 customProxyPathHint: '设置自定义代理路径。访问该路径下的子路径时，将直接跳转到代理访问功能。例如：设置 test 后，访问 /test/123 将直接代理访问 123 这个URL。',
+                proxyAccessPassword: '代理访问密码 (PROXY_PASSWORD):',
+                proxyAccessPasswordPlaceholder: '留空则不设置密码',
+                proxyAccessPasswordHint: '设置代理访问密码。打开代理访问页面时需要输入密码才能访问。留空则不启用密码保护。',
                 customIP: '自定义ProxyIP (p):',
                 preferredIPs: '优选IP列表 (yx):',
                 preferredIPsURL: '优选IP来源URL (yxURL):',
@@ -4578,8 +5503,10 @@ async function handleSubscriptionPage(request, user = null) {
                     </div>
                     <div style="margin-bottom: 15px;">
                             <label style="display: block; margin-bottom: 8px; color: #ffffff; font-weight: bold; text-shadow: none; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision;">${t.customIP}</label>
-                            <input type="text" id="customIP" placeholder="例如: 1.2.3.4:443" style="width: 100%; padding: 12px; background: rgba(0, 0, 0, 0.6); border: 1px solid #ffffff; border-radius: 8px; color: #ffffff; font-weight: bold; font-family: 'Courier New', monospace; font-size: 14px; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; backdrop-filter: blur(10px);">
-                            <small style="color: #ffffff; font-weight: bold; font-size: 0.85rem; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; text-shadow: none; opacity: 1;">自定义ProxyIP地址和端口</small>
+                            <div style="display: flex; gap: 10px; align-items: flex-end;">
+                                <input type="text" id="customIP" placeholder="例如: 1.2.3.4:443" style="flex: 1; padding: 12px; background: rgba(0, 0, 0, 0.6); border: 1px solid #ffffff; border-radius: 8px; color: #ffffff; font-weight: bold; font-family: 'Courier New', monospace; font-size: 14px; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; backdrop-filter: blur(10px);">
+                            </div>
+                            <small style="color: #ffffff; font-weight: bold; font-size: 0.85rem; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; text-shadow: none; opacity: 1; display: block; margin-top: 8px;">自定义ProxyIP地址和端口</small>
                     </div>
                     <div style="margin-bottom: 15px;">
                             <label style="display: block; margin-bottom: 8px; color: #ffffff; font-weight: bold; text-shadow: none; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision;">${t.preferredIPs}</label>
@@ -4739,6 +5666,11 @@ async function handleSubscriptionPage(request, user = null) {
                     <input type="text" id="customProxyPath" placeholder="${t.customProxyPathPlaceholder}" style="width: 100%; padding: 12px; background: rgba(0, 0, 0, 0.6); border: 1px solid #ffffff; border-radius: 8px; color: #ffffff; font-weight: bold; font-family: 'Courier New', monospace; font-size: 14px; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; backdrop-filter: blur(10px);">
                     <small style="color: #ffffff; font-weight: bold; font-size: 0.85rem; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; text-shadow: none; opacity: 1; display: block; margin-top: 8px;">${t.customProxyPathHint}</small>
                 </div>
+                <div style="margin-bottom: 15px;">
+                    <label style="display: block; margin-bottom: 8px; color: #ffffff; font-weight: bold; text-shadow: none; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision;">${t.proxyAccessPassword}</label>
+                    <input type="password" id="proxyAccessPassword" placeholder="${t.proxyAccessPasswordPlaceholder}" style="width: 100%; padding: 12px; background: rgba(0, 0, 0, 0.6); border: 1px solid #ffffff; border-radius: 8px; color: #ffffff; font-weight: bold; font-family: 'Courier New', monospace; font-size: 14px; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; backdrop-filter: blur(10px);">
+                    <small style="color: #ffffff; font-weight: bold; font-size: 0.85rem; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; text-shadow: none; opacity: 1; display: block; margin-top: 8px;">${t.proxyAccessPasswordHint}</small>
+                </div>
                 <button type="button" id="saveProxyPathBtn" style="background: rgba(0, 0, 0, 0.6); border: 1px solid #ffffff; border-radius: 8px; padding: 12px 24px; color: #ffffff; font-weight: bold; font-family: 'Courier New', monospace; font-weight: bold; cursor: pointer; text-shadow: none; transition: all 0.4s ease; -webkit-font-smoothing: subpixel-antialiased; -moz-osx-font-smoothing: auto; text-rendering: geometricPrecision; opacity: 1; backdrop-filter: blur(10px); box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3); width: 100%;">保存代理路径配置</button>
             </div>
             <div style="margin-top: 15px; text-align: center;">
@@ -4783,6 +5715,7 @@ async function handleSubscriptionPage(request, user = null) {
         </div>
     </div>
     <script>
+        console.log('[Script] 订阅页面脚本开始加载');
         // 订阅转换地址（从服务器配置注入）
         var SUB_CONVERTER_URL = "${ scu }";
         // 远程配置URL（硬编码）
@@ -4790,6 +5723,8 @@ async function handleSubscriptionPage(request, user = null) {
         
         // 上传/下载相关（订阅页面）
         var lastUploadUrl = '';
+        
+        console.log('[Script] 基本变量初始化完成');
 
         function getApiBasePath() {
             var basePath = window.location.pathname || '/';
@@ -4816,12 +5751,73 @@ async function handleSubscriptionPage(request, user = null) {
             window.open(currentOrigin + '/__test__', '_blank');
         }
 
+
         // 更新代理提示文本，显示当前域名
         (function() {
             var hintText = document.getElementById('proxyHintText');
             if (hintText) {
                 var currentOrigin = window.location.origin;
                 hintText.textContent = '在网址后输入目标网站，例如: ' + currentOrigin + '/github.com 或 ' + currentOrigin + '/https://github.com';
+            }
+        })();
+
+        // 代理访问功能独立处理：为targetUrl输入框添加独立的回车事件处理
+        // 确保代理访问功能完全独立，不受U变量输入和回车的影响
+        (function() {
+            // 等待DOM加载完成
+            function initProxyAccess() {
+                var targetUrlInput = document.getElementById('targetUrl');
+                if (targetUrlInput) {
+                    // 为代理访问输入框添加独立的回车事件处理
+                    // 使用capture阶段和stopImmediatePropagation确保完全独立
+                    targetUrlInput.addEventListener('keypress', function(e) {
+                        // 只处理回车键
+                        if (e.key === 'Enter' || e.keyCode === 13) {
+                            // 检查当前焦点是否在targetUrlInput上，确保不会误触发
+                            if (document.activeElement !== targetUrlInput) {
+                                return; // 如果焦点不在targetUrlInput上，不处理
+                            }
+                            e.preventDefault();
+                            e.stopPropagation(); // 阻止事件冒泡
+                            e.stopImmediatePropagation(); // 阻止同一元素上的其他监听器
+                            // 直接触发表单提交，使用独立的代理访问逻辑
+                            var form = document.getElementById('urlForm');
+                            if (form && typeof redirectToProxy === 'function') {
+                                redirectToProxy(e);
+                            }
+                        }
+                    }, true); // 使用capture阶段，确保优先处理
+                    
+                    // 确保输入框获得焦点时不会触发U变量的处理
+                    targetUrlInput.addEventListener('focus', function(e) {
+                        e.stopPropagation();
+                        e.stopImmediatePropagation();
+                    }, true);
+                    
+                    // 确保输入框失去焦点时也不会触发其他处理
+                    targetUrlInput.addEventListener('blur', function(e) {
+                        e.stopPropagation();
+                        e.stopImmediatePropagation();
+                    }, true);
+                }
+                
+                // 为表单添加独立的提交处理
+                var urlForm = document.getElementById('urlForm');
+                if (urlForm && typeof redirectToProxy === 'function') {
+                    urlForm.addEventListener('submit', function(e) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        e.stopImmediatePropagation();
+                        redirectToProxy(e);
+                    }, true);
+                }
+            }
+            
+            // 如果DOM已加载，立即初始化；否则等待DOMContentLoaded
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', initProxyAccess);
+            } else {
+                initProxyAccess();
             }
         })();
 
@@ -4832,10 +5828,17 @@ async function handleSubscriptionPage(request, user = null) {
                 saveProxyPathBtn.addEventListener('click', async function(e) {
                     e.preventDefault();
                     var customProxyPath = document.getElementById('customProxyPath');
+                    var proxyAccessPassword = document.getElementById('proxyAccessPassword');
                     if (!customProxyPath) return;
                     
                     var proxyPathValue = customProxyPath.value.trim();
+                    var passwordValue = proxyAccessPassword ? proxyAccessPassword.value.trim() : '';
                     var configData = { PROXY_PATH: proxyPathValue };
+                    if (passwordValue) {
+                        configData.PROXY_PASSWORD = passwordValue;
+                    } else {
+                        configData.PROXY_PASSWORD = '';
+                    }
                     
                     // 使用saveConfig函数保存配置
                     if (typeof saveConfig === 'function') {
@@ -5321,6 +6324,22 @@ async function handleSubscriptionPage(request, user = null) {
             }, 100);
         }
         
+        // 格式化IP地址显示（中文形式）- 前端函数
+        function formatIPDisplay(ip) {
+            if (!ip) return '未知IP地址';
+            
+            // 判断IP类型
+            const isIPv6 = ip.includes(':');
+            
+            if (isIPv6) {
+                // IPv6地址 - 显示为"IPv6: xxx"格式
+                return 'IPv6: ' + ip;
+            } else {
+                // IPv4地址 - 显示为"IPv4: xxx"格式
+                return 'IPv4: ' + ip;
+            }
+        }
+        
         // 获取订阅使用统计
         async function loadSubscriptionStats() {
             try {
@@ -5367,7 +6386,22 @@ async function handleSubscriptionPage(request, user = null) {
                         data.clients.forEach((client, index) => {
                             const timeAgo = getTimeAgo(client.lastAccess);
                             const statusText = client.isOnline ? '● 在线' : '○ 离线';
-                            const optionText = (client.client || '未知客户端') + ' | ' + (client.ip || '未知') + ' | ' + statusText + ' | ' + timeAgo;
+                            
+                            // 构建地理位置信息字符串
+                            let locationText = '';
+                            if (client.location) {
+                                const loc = client.location;
+                                const parts = [];
+                                if (loc.country) parts.push(loc.country);
+                                if (loc.region) parts.push(loc.region);
+                                if (loc.city) parts.push(loc.city);
+                                if (loc.district) parts.push(loc.district);
+                                locationText = parts.length > 0 ? ' | ' + parts.join(' ') : '';
+                            }
+                            
+                            // 使用中文形式显示IP
+                            const ipDisplay = formatIPDisplay(client.ip || '未知');
+                            const optionText = (client.client || '未知客户端') + ' | ' + ipDisplay + locationText + ' | ' + statusText + ' | ' + timeAgo;
                             
                             const option = document.createElement('option');
                             option.value = index;
@@ -5395,6 +6429,27 @@ async function handleSubscriptionPage(request, user = null) {
                                 ? '<span style="color: #4ade80; font-weight: bold;">● 在线</span>' 
                                 : '<span style="color: #888;">○ 离线</span>';
                             
+                            // 构建地理位置详情HTML
+                            let locationHtml = '';
+                            if (clientData.location) {
+                                const loc = clientData.location;
+                                locationHtml = '<div style="margin-bottom: 8px; padding: 10px; background: rgba(0, 0, 0, 0.3); border-radius: 6px; border-left: 3px solid #4ade80;">' +
+                                    '<div style="margin-bottom: 6px; font-weight: bold; color: #4ade80; font-size: 0.95rem;">🌍 地理位置信息:</div>' +
+                                    (loc.country ? '<div style="margin-bottom: 4px;"><span style="color: #888;">国家:</span> <span style="color: #ffffff; font-weight: bold;">' + loc.country + '</span></div>' : '') +
+                                    (loc.region ? '<div style="margin-bottom: 4px;"><span style="color: #888;">省/州:</span> <span style="color: #ffffff; font-weight: bold;">' + loc.region + '</span></div>' : '') +
+                                    (loc.city ? '<div style="margin-bottom: 4px;"><span style="color: #888;">市:</span> <span style="color: #ffffff; font-weight: bold;">' + loc.city + '</span></div>' : '') +
+                                    (loc.district ? '<div style="margin-bottom: 4px;"><span style="color: #888;">区/镇:</span> <span style="color: #ffffff; font-weight: bold;">' + loc.district + '</span></div>' : '') +
+                                    (loc.isp ? '<div style="margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(255, 255, 255, 0.1);"><span style="color: #888;">ISP:</span> <span style="color: #ffffff; font-size: 0.85rem;">' + loc.isp + '</span></div>' : '') +
+                                '</div>';
+                            } else {
+                                locationHtml = '<div style="margin-bottom: 8px; padding: 10px; background: rgba(0, 0, 0, 0.3); border-radius: 6px; border-left: 3px solid #888;">' +
+                                    '<div style="color: #888; font-size: 0.9rem;">🌍 地理位置信息: 无法获取</div>' +
+                                '</div>';
+                            }
+                            
+                            // 格式化IP显示（中文形式）
+                            const ipDisplay = formatIPDisplay(clientData.ip || '未知');
+                            
                             const detailsHtml = 
                                 '<div style="margin-bottom: 10px; font-weight: bold; font-size: 1.1rem; color: #ffffff; border-bottom: 1px solid rgba(255, 255, 255, 0.3); padding-bottom: 8px;">' +
                                     (clientData.client || '未知客户端') + ' ' + statusBadge +
@@ -5402,8 +6457,9 @@ async function handleSubscriptionPage(request, user = null) {
                                 '<div style="font-size: 0.9rem; color: #cccccc; line-height: 1.8;">' +
                                     '<div style="margin-bottom: 8px;">' +
                                         '<span style="color: #888;">📍 IP地址:</span> ' +
-                                        '<span style="color: #ffffff; font-weight: bold;">' + (clientData.ip || '未知') + '</span>' +
+                                        '<span style="color: #ffffff; font-weight: bold;">' + ipDisplay + '</span>' +
                                     '</div>' +
+                                    locationHtml +
                                     '<div style="margin-bottom: 8px;">' +
                                         '<span style="color: #888;">🕐 最后访问:</span> ' +
                                         '<span style="color: #ffffff;">' + timeAgo + '</span>' +
@@ -5805,6 +6861,10 @@ async function handleSubscriptionPage(request, user = null) {
                 if (document.getElementById('ispTelecom')) document.getElementById('ispTelecom').checked = config.ispTelecom !== 'no';
                 document.getElementById('customPath').value = config.d || '';
                 document.getElementById('customProxyPath').value = config.PROXY_PATH || config.proxy_path || '';
+                var proxyAccessPasswordInput = document.getElementById('proxyAccessPassword');
+                if (proxyAccessPasswordInput) {
+                    proxyAccessPasswordInput.value = config.PROXY_PASSWORD || config.proxy_password || '';
+                }
                 document.getElementById('customIP').value = config.p || '';
                 document.getElementById('preferredIPs').value = config.yx || '';
                 document.getElementById('preferredIPsURL').value = config.yxURL || '';
@@ -6030,7 +7090,9 @@ async function handleSubscriptionPage(request, user = null) {
             }
         }
         
+        console.log('[Script] 准备绑定 DOMContentLoaded 事件');
         document.addEventListener('DOMContentLoaded', function() {
+            console.log('[DOMContentLoaded] 事件触发');
             // createMatrixRain(); // 已禁用动态背景
             checkSystemStatus();
             loadSubscriptionStats();
@@ -6087,6 +7149,7 @@ async function handleSubscriptionPage(request, user = null) {
                     const configData = { ev: document.getElementById('ev').checked ? 'yes' : 'no', et: document.getElementById('et').checked ? 'yes' : 'no', ex: document.getElementById('ex').checked ? 'yes' : 'no', es: document.getElementById('es').checked ? 'yes' : 'no', tp: document.getElementById('tp').value,
                         d: document.getElementById('customPath').value,
                         PROXY_PATH: document.getElementById('customProxyPath').value,
+                        PROXY_PASSWORD: document.getElementById('proxyAccessPassword') ? document.getElementById('proxyAccessPassword').value : '',
                         p: document.getElementById('customIP').value,
                         yx: document.getElementById('preferredIPs').value,
                         yxURL: document.getElementById('preferredIPsURL').value,
@@ -7478,23 +8541,7 @@ async function handleConfigAPI(request) {
                     }
                 }
             } else {
-                backupIPs = [
-                    { domain: 'ProxyIP.US.CMLiussss.net', region: 'US', regionCode: 'US', port: 443 },
-                    { domain: 'ProxyIP.SG.CMLiussss.net', region: 'SG', regionCode: 'SG', port: 443 },
-                    { domain: 'ProxyIP.JP.CMLiussss.net', region: 'JP', regionCode: 'JP', port: 443 },
-                    { domain: 'ProxyIP.TW.CMLiussss.net', region: 'TW', regionCode: 'TW', port: 443 },
-                    { domain: 'ProxyIP.HK.CMLiussss.net', region: 'HK', regionCode: 'HK', port: 443 },
-                    { domain: 'ProxyIP.KR.CMLiussss.net', region: 'KR', regionCode: 'KR', port: 443 },
-                    { domain: 'ProxyIP.DE.CMLiussss.net', region: 'DE', regionCode: 'DE', port: 443 },
-                    { domain: 'ProxyIP.SE.CMLiussss.net', region: 'SE', regionCode: 'SE', port: 443 },
-                    { domain: 'ProxyIP.NL.CMLiussss.net', region: 'NL', regionCode: 'NL', port: 443 },
-                    { domain: 'ProxyIP.FI.CMLiussss.net', region: 'FI', regionCode: 'FI', port: 443 },
-                    { domain: 'ProxyIP.GB.CMLiussss.net', region: 'GB', regionCode: 'GB', port: 443 },
-                    { domain: 'ProxyIP.Oracle.cmliussss.net', region: 'Oracle', regionCode: 'Oracle', port: 443 },
-                    { domain: 'ProxyIP.DigitalOcean.CMLiussss.net', region: 'DigitalOcean', regionCode: 'DigitalOcean', port: 443 },
-                    { domain: 'ProxyIP.Vultr.CMLiussss.net', region: 'Vultr', regionCode: 'Vultr', port: 443 },
-                    { domain: 'ProxyIP.Multacom.CMLiussss.net', region: 'Multacom', regionCode: 'Multacom', port: 443 }
-                ];
+                backupIPs = [];
                 directDomains.length = 0;
                 directDomains.push(
                     { name: "cloudflare.182682.xyz", domain: "cloudflare.182682.xyz" }, 
@@ -8248,8 +9295,255 @@ function generateTestPageHTML(headersJson, workerHostJson) {
 </html>`;
 }
 
+// 生成认证token（简单的哈希）
+async function generateAuthToken(password, path) {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(password + path + 'proxy_access_salt');
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    return hashHex.substring(0, 32); // 使用前32个字符作为token
+}
+
+// 显示密码输入页面
+function showPasswordInputPage(url, isError) {
+    const langAttr = 'zh-CN';
+    const currentPath = url.pathname;
+    
+    const passwordHtml = `<!DOCTYPE html>
+    <html lang="${langAttr}" dir="ltr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>代理访问 - 密码验证</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: "Courier New", monospace;
+            font-weight: bold;
+            background: #000 url('/bg-image') center center / cover no-repeat fixed;
+            color: #ffffff; font-weight: bold; min-height: 100vh;
+            overflow-x: hidden; position: relative;
+            display: flex; justify-content: center; align-items: center;
+        }
+        .container { max-width: 500px; margin: 0 auto; padding: 20px; position: relative; z-index: 1; width: 100%; }
+        .card {
+            background: rgba(0, 0, 0, 0.6);
+            border: 1px solid #ffffff;
+            border-radius: 12px; padding: 30px; margin-bottom: 20px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+            backdrop-filter: blur(10px);
+        }
+        .card-title {
+            font-size: 1.8rem; margin-bottom: 20px;
+            color: #ffffff; font-weight: bold; text-align: center;
+        }
+        .error-message {
+            color: #ff0000; font-weight: bold; font-size: 0.9rem;
+            text-align: center; margin-bottom: 15px; display: ${isError ? 'block' : 'none'};
+        }
+        input[type="password"] {
+            width: 100%; padding: 12px; background: rgba(0, 0, 0, 0.6);
+            border: 1px solid #ffffff; border-radius: 8px; color: #ffffff;
+            font-weight: bold; font-family: "Courier New", monospace; font-size: 14px;
+            margin-bottom: 15px;
+        }
+        button {
+            padding: 12px 24px; background: rgba(0, 0, 0, 0.6);
+            border: 1px solid #ffffff; border-radius: 8px; color: #ffffff;
+            font-weight: bold; font-family: "Courier New", monospace;
+            cursor: pointer; transition: all 0.4s ease; width: 100%;
+        }
+        button:hover {
+            background: rgba(0, 0, 0, 0.7);
+            box-shadow: 0 4px 20px rgba(255, 255, 255, 0.2);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <h2 class="card-title">🔒 代理访问密码验证</h2>
+            <div class="error-message">密码错误，请重新输入</div>
+            <form method="POST" action="${currentPath}">
+                <div style="margin-bottom: 15px;">
+                    <label for="password" style="display: block; margin-bottom: 8px; color: #ffffff; font-weight: bold;">请输入访问密码:</label>
+                    <input type="password" id="password" name="password" placeholder="输入密码" autofocus required>
+                </div>
+                <button type="submit">验证</button>
+            </form>
+        </div>
+    </div>
+</body>
+</html>`;
+    
+    return new Response(passwordHtml, {
+        status: 200,
+        headers: { 'Content-Type': 'text/html; charset=utf-8' }
+    });
+}
+
 // 处理测试页面请求
 async function handleProxyOnlyPage(request, url) {
+    // 检查是否设置了PROXY_PATH，如果没有设置则不允许打开代理访问页面
+    // 只从KV存储中获取配置，不依赖env参数（因为env在这个函数作用域中不可用）
+    const customProxyPath = getConfigValue('PROXY_PATH', '');
+    if (!customProxyPath || !customProxyPath.trim()) {
+        // 返回错误提示页面
+        const errorHtml = `<!DOCTYPE html>
+    <html lang="zh-CN" dir="ltr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>代理访问未启用</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: "Courier New", monospace;
+            font-weight: bold;
+            background: #000 url('/bg-image') center center / cover no-repeat fixed;
+            color: #ffffff; font-weight: bold; min-height: 100vh;
+            overflow-x: hidden; position: relative;
+            display: flex; justify-content: center; align-items: center;
+        }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; position: relative; z-index: 1; width: 100%; }
+        .card {
+            background: rgba(0, 0, 0, 0.6);
+            border: 1px solid #ff0000;
+            border-radius: 12px; padding: 30px; margin-bottom: 20px;
+            box-shadow: 0 4px 20px rgba(255, 0, 0, 0.3);
+            backdrop-filter: blur(10px);
+        }
+        .card-title {
+            font-size: 1.8rem; margin-bottom: 20px;
+            color: #ff0000; font-weight: bold; text-align: center;
+        }
+        .error-message {
+            color: #ffffff; font-weight: bold; font-size: 1rem;
+            line-height: 1.6; text-align: center; margin-bottom: 20px;
+        }
+        .error-detail {
+            color: #ffaaaa; font-weight: bold; font-size: 0.9rem;
+            line-height: 1.6; text-align: left; margin-top: 15px;
+            padding: 15px; background: rgba(255, 0, 0, 0.1);
+            border-radius: 8px; border: 1px solid rgba(255, 0, 0, 0.3);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <h2 class="card-title">⚠️ 代理访问未启用</h2>
+            <div class="error-message">
+                代理访问功能需要先设置自定义代理路径 (PROXY_PATH) 才能使用。
+            </div>
+            <div class="error-detail">
+                <strong>使用说明：</strong><br>
+                1. 请在配置页面设置"自定义代理路径 (PROXY_PATH)"<br>
+                2. 设置完成后，代理访问功能才会启用<br>
+                3. 只有设置了PROXY_PATH后，才能打开代理访问独立页面
+            </div>
+        </div>
+    </div>
+</body>
+</html>`;
+        
+        return new Response(errorHtml, {
+            status: 403,
+            headers: { 'Content-Type': 'text/html; charset=utf-8' }
+        });
+    }
+    
+    // 验证当前路径是否匹配PROXY_PATH，只有匹配时才显示代理访问页面
+    const proxyPathPattern = customProxyPath.trim();
+    const normalizedPath = url.pathname.endsWith('/') && url.pathname.length > 1 ? url.pathname.slice(0, -1) : url.pathname;
+    const cleanProxyPath = proxyPathPattern.startsWith('/') ? proxyPathPattern.substring(1) : proxyPathPattern;
+    
+    // 获取自定义路径和UUID（从全局变量获取，这些变量在fetch函数中已设置）
+    // 如果全局变量未设置，从配置中获取
+    const currentCp = (typeof cp !== 'undefined' && cp) ? cp : getConfigValue('d', '');
+    const currentAt = (typeof at !== 'undefined' && at) ? at.toLowerCase() : getConfigValue('u', '').toLowerCase();
+    
+    let pathMatches = false;
+    
+    // 如果设置了自定义路径（cp），需要检查路径格式：/{UUID}/{自定义路径}/{PROXY_PATH}
+    if (currentCp && currentCp.trim()) {
+        const cleanCustomPath = currentCp.trim().startsWith('/') ? currentCp.trim().substring(1) : currentCp.trim();
+        const pathParts = normalizedPath.substring(1).split('/');
+        
+        // 路径必须是：/{UUID}/{自定义路径}/{PROXY_PATH}
+        if (pathParts.length >= 3) {
+            const firstPart = pathParts[0];
+            const secondPart = pathParts[1];
+            const thirdPart = pathParts[2];
+            
+            // 验证：第一部分是UUID，第二部分是自定义路径，第三部分是PROXY_PATH
+            if (isValidFormat(firstPart) && firstPart === currentAt && secondPart === cleanCustomPath && thirdPart === cleanProxyPath) {
+                pathMatches = true;
+            }
+        }
+    } else {
+        // 没有设置自定义路径，检查路径格式：/{PROXY_PATH} 或 /{UUID}/{PROXY_PATH}
+        const pathParts = normalizedPath.substring(1).split('/');
+        
+        if (pathParts.length === 1 && pathParts[0] === cleanProxyPath) {
+            // 路径正好是 /{PROXY_PATH}
+            pathMatches = true;
+        } else if (pathParts.length === 2) {
+            // 路径格式：/{UUID}/{PROXY_PATH}
+            const firstPart = pathParts[0];
+            const secondPart = pathParts[1];
+            if (isValidFormat(firstPart) && firstPart === currentAt && secondPart === cleanProxyPath) {
+                pathMatches = true;
+            }
+        }
+    }
+    
+    // 如果路径不匹配PROXY_PATH，返回404
+    if (!pathMatches) {
+        return new Response(JSON.stringify({ error: 'Not Found' }), { 
+            status: 404,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+    
+    // 检查是否设置了代理访问密码
+    const proxyPassword = getConfigValue('PROXY_PASSWORD', '');
+    const cookieName = '__PROXY_ACCESS_AUTH__';
+    
+    // 如果设置了密码，检查Cookie验证
+    if (proxyPassword && proxyPassword.trim()) {
+        const cookies = request.headers.get('Cookie') || '';
+        const cookieMatch = cookies.match(new RegExp(`${cookieName}=([^;]+)`));
+        const authToken = cookieMatch ? cookieMatch[1] : null;
+        
+        // 验证Cookie中的token（使用简单的哈希验证）
+        const expectedToken = await generateAuthToken(proxyPassword.trim(), url.pathname);
+        const isValidAuth = authToken === expectedToken;
+        
+        // 如果验证失败，检查是否是密码提交请求
+        if (!isValidAuth) {
+            const formData = await request.formData().catch(() => null);
+            if (formData) {
+                const submittedPassword = formData.get('password');
+                if (submittedPassword && submittedPassword === proxyPassword.trim()) {
+                    // 密码正确，设置Cookie并重定向
+                    const authToken = await generateAuthToken(proxyPassword.trim(), url.pathname);
+                    const headers = new Headers();
+                    headers.set('Location', url.pathname);
+                    headers.set('Set-Cookie', `${cookieName}=${authToken}; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax`);
+                    return new Response(null, { status: 302, headers });
+                } else {
+                    // 密码错误，显示密码输入页面
+                    return showPasswordInputPage(url, true);
+                }
+            } else {
+                // 没有提交密码，显示密码输入页面
+                return showPasswordInputPage(url, false);
+            }
+        }
+    }
+    
     const langAttr = 'zh-CN';
     const currentOrigin = url.origin;
     
@@ -8317,17 +9611,71 @@ async function handleProxyOnlyPage(request, url) {
         </div>
     </div>
     <script>
-        function redirectToProxy(event) {
-            event.preventDefault();
-            var targetUrl = document.getElementById('targetUrl').value.trim();
-            if (!targetUrl) {
-                alert('请输入目标网址');
-                return;
+        // 代理访问功能独立处理：完全隔离，不受U变量输入影响
+        (function() {
+            // 独立的代理访问处理函数
+            function redirectToProxy(event) {
+                if (event) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    event.stopImmediatePropagation();
+                }
+                var targetUrlInput = document.getElementById('targetUrl');
+                if (!targetUrlInput) return;
+                
+                var targetUrl = targetUrlInput.value.trim();
+                if (!targetUrl) {
+                    alert('请输入目标网址');
+                    return;
+                }
+                var currentOrigin = window.location.origin;
+                var proxyUrl = currentOrigin + '/' + targetUrl;
+                window.open(proxyUrl, '_blank');
             }
-            var currentOrigin = window.location.origin;
-            var proxyUrl = currentOrigin + '/' + targetUrl;
-            window.open(proxyUrl, '_blank');
-        }
+            
+            // 将函数暴露到全局作用域，供表单onsubmit使用
+            window.redirectToProxy = redirectToProxy;
+            
+            // 页面加载完成后，为代理访问输入框添加独立的事件处理
+            document.addEventListener('DOMContentLoaded', function() {
+                var targetUrlInput = document.getElementById('targetUrl');
+                if (targetUrlInput) {
+                    // 为代理访问输入框添加独立的回车事件处理
+                    // 使用capture阶段和stopImmediatePropagation确保完全独立
+                    targetUrlInput.addEventListener('keypress', function(e) {
+                        if (e.key === 'Enter' || e.keyCode === 13) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            e.stopImmediatePropagation();
+                            redirectToProxy(e);
+                        }
+                    }, true); // 使用capture阶段，确保优先处理
+                    
+                    // 确保输入框获得焦点时不会触发其他处理
+                    targetUrlInput.addEventListener('focus', function(e) {
+                        e.stopPropagation();
+                        e.stopImmediatePropagation();
+                    }, true);
+                    
+                    // 确保输入框失去焦点时也不会触发其他处理
+                    targetUrlInput.addEventListener('blur', function(e) {
+                        e.stopPropagation();
+                        e.stopImmediatePropagation();
+                    }, true);
+                }
+                
+                // 为表单添加独立的提交处理
+                var urlForm = document.getElementById('urlForm');
+                if (urlForm) {
+                    urlForm.addEventListener('submit', function(e) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        e.stopImmediatePropagation();
+                        redirectToProxy(e);
+                    }, true);
+                }
+            });
+        })();
     </script>
 </body>
 </html>`;
@@ -8492,10 +9840,8 @@ async function handleProxyRequest(request, url) {
     var actualUrlStr = url.pathname.substring(url.pathname.indexOf(proxyStr) + proxyStr.length) + url.search + url.hash;
     
     if (actualUrlStr == "") {
-        // 返回主页（使用 worker.js 中的主页）
-        return new Response("代理功能已启用，请在URL后输入目标网站地址", {
-            headers: { "Content-Type": "text/html; charset=utf-8" }
-        });
+        // 返回代理访问页面
+        return await handleProxyOnlyPage(request, url);
     }
 
     // 验证URL
@@ -8537,15 +9883,17 @@ async function handleProxyRequest(request, url) {
         return domains[Math.floor(Math.random() * domains.length)];
     }
     
-    // 生成随机User-Agent（模拟常见浏览器）
+    // 生成随机User-Agent（模拟常见浏览器，使用更现代的版本）
     function generateRandomUserAgent() {
         const userAgents = [
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
-            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
         ];
         return userAgents[Math.floor(Math.random() * userAgents.length)];
     }
@@ -8569,7 +9917,15 @@ async function handleProxyRequest(request, url) {
         'X-Client-Ip',
         'X-Originating-Ip',
         'X-Remote-Ip',
-        'X-Remote-Addr'
+        'X-Remote-Addr',
+        // 移除客户端发送的 Sec-Fetch-* 请求头，我们将重新设置正确的值
+        'Sec-Fetch-Dest',
+        'Sec-Fetch-Mode',
+        'Sec-Fetch-Site',
+        'Sec-Fetch-User',
+        'Sec-Ch-Ua',
+        'Sec-Ch-Ua-Mobile',
+        'Sec-Ch-Ua-Platform'
     ];
     
     // 需要替换的请求头
@@ -8617,9 +9973,115 @@ async function handleProxyRequest(request, url) {
         clientHeaderWithChange.set('User-Agent', generateRandomUserAgent());
     }
     
+    // 设置必要的浏览器请求头以通过 Google 等网站的验证
+    if (!clientHeaderWithChange.has('Accept')) {
+        clientHeaderWithChange.set('Accept', 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7');
+    }
+    
+    if (!clientHeaderWithChange.has('Accept-Language')) {
+        // 对于 Google，优先使用英文，减少被检测的概率
+        const languages = actualUrl.hostname.includes('google.com') ? [
+            'en-US,en;q=0.9',
+            'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+            'en-GB,en;q=0.9'
+        ] : [
+            'en-US,en;q=0.9',
+            'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
+            'en-GB,en;q=0.9',
+            'en-US,en;q=0.9,ja;q=0.8'
+        ];
+        clientHeaderWithChange.set('Accept-Language', languages[Math.floor(Math.random() * languages.length)]);
+    }
+    
+    if (!clientHeaderWithChange.has('Accept-Encoding')) {
+        clientHeaderWithChange.set('Accept-Encoding', 'gzip, deflate, br');
+    }
+    
+    // 强制设置现代浏览器的 Sec-Fetch-* 请求头（覆盖客户端发送的值）
+    // 注意：这些请求头必须设置为正确的值，不能使用客户端发送的值
+    clientHeaderWithChange.set('Sec-Fetch-Dest', 'document');
+    clientHeaderWithChange.set('Sec-Fetch-Mode', 'navigate');
+    clientHeaderWithChange.set('Sec-Fetch-Site', 'none'); // 关键：必须是 'none'，不能是 'same-origin'
+    clientHeaderWithChange.set('Sec-Fetch-User', '?1');
+    
+    // 添加 Sec-Ch-Ua-* 请求头以匹配 User-Agent（现代浏览器的特征）
+    const userAgent = clientHeaderWithChange.get('User-Agent') || '';
+    if (userAgent.includes('Chrome')) {
+        // Chrome/Edge 的 Sec-Ch-Ua 格式
+        clientHeaderWithChange.set('Sec-Ch-Ua', '"Google Chrome";v="131", "Not?A_Brand";v="8", "Chromium";v="131"');
+        clientHeaderWithChange.set('Sec-Ch-Ua-Mobile', '?0');
+        if (userAgent.includes('Windows')) {
+            clientHeaderWithChange.set('Sec-Ch-Ua-Platform', '"Windows"');
+        } else if (userAgent.includes('Macintosh')) {
+            clientHeaderWithChange.set('Sec-Ch-Ua-Platform', '"macOS"');
+        } else if (userAgent.includes('Linux')) {
+            clientHeaderWithChange.set('Sec-Ch-Ua-Platform', '"Linux"');
+        }
+    } else if (userAgent.includes('Firefox')) {
+        // Firefox 不使用 Sec-Ch-Ua，但我们可以不设置
+    } else if (userAgent.includes('Safari') && !userAgent.includes('Chrome')) {
+        // Safari 不使用 Sec-Ch-Ua，但我们可以不设置
+    }
+    
+    // 设置 Referer 和 Origin（如果访问的是 Google）
+    if (actualUrl.hostname.includes('google.com')) {
+        if (!clientHeaderWithChange.has('Referer')) {
+            clientHeaderWithChange.set('Referer', `${actualUrl.protocol}//${actualUrl.hostname}/`);
+        }
+        if (!clientHeaderWithChange.has('Origin')) {
+            clientHeaderWithChange.set('Origin', `${actualUrl.protocol}//${actualUrl.hostname}`);
+        }
+    }
+    
+    // 设置 DNT (Do Not Track) 请求头
+    if (!clientHeaderWithChange.has('DNT')) {
+        clientHeaderWithChange.set('DNT', '1');
+    }
+    
+    // 设置 Upgrade-Insecure-Requests
+    if (!clientHeaderWithChange.has('Upgrade-Insecure-Requests')) {
+        clientHeaderWithChange.set('Upgrade-Insecure-Requests', '1');
+    }
+    
+    // 设置 Connection 头（现代浏览器通常使用 keep-alive）
+    if (!clientHeaderWithChange.has('Connection')) {
+        clientHeaderWithChange.set('Connection', 'keep-alive');
+    }
+    
+    // 设置 Cache-Control（针对 Google 等网站）
+    if (actualUrl.hostname.includes('google.com')) {
+        if (!clientHeaderWithChange.has('Cache-Control')) {
+            clientHeaderWithChange.set('Cache-Control', 'max-age=0');
+        }
+    }
+    
+    // 确保 Cookie 被正确传递（如果存在）
+    if (siteCookie && !clientHeaderWithChange.has('Cookie')) {
+        // 过滤掉代理相关的 Cookie，只保留目标网站的 Cookie
+        const cookies = siteCookie.split(';').map(c => c.trim()).filter(c => {
+            // 保留目标网站的 Cookie，移除代理相关的 Cookie
+            return !c.startsWith(proxyHintCookieName) && 
+                   !c.startsWith(lastVisitProxyCookie) && 
+                   !c.startsWith(passwordCookieName);
+        });
+        if (cookies.length > 0) {
+            clientHeaderWithChange.set('Cookie', cookies.join('; '));
+        }
+    }
+    
     // 设置伪造的X-Forwarded-For（如果需要）
     if (!clientHeaderWithChange.has('X-Forwarded-For')) {
         clientHeaderWithChange.set('X-Forwarded-For', generateRandomIP());
+    }
+    
+    // 调试日志：记录发送给 Google 的请求头（仅在开发时启用）
+    if (actualUrl.hostname.includes('google.com')) {
+        console.log('[Google代理] 目标URL:', actualUrl.href);
+        console.log('[Google代理] User-Agent:', clientHeaderWithChange.get('User-Agent'));
+        console.log('[Google代理] Accept:', clientHeaderWithChange.get('Accept'));
+        console.log('[Google代理] Accept-Language:', clientHeaderWithChange.get('Accept-Language'));
+        console.log('[Google代理] Sec-Fetch-Site:', clientHeaderWithChange.get('Sec-Fetch-Site'));
+        console.log('[Google代理] Cookie存在:', clientHeaderWithChange.has('Cookie'));
     }
 
     // 处理请求体
@@ -8713,6 +10175,16 @@ async function handleProxyRequest(request, url) {
                             }
                             
                             try {
+                                // 特殊处理：允许 Google 的静态资源直接加载（不通过代理）
+                                // 这对于 reCAPTCHA 等服务的正常工作至关重要
+                                if (relativePath_str.includes('gstatic.com') || 
+                                    relativePath_str.includes('googleapis.com') ||
+                                    relativePath_str.includes('google.com/recaptcha') ||
+                                    relativePath_str.includes('recaptcha.net')) {
+                                    // 如果是 Google 的静态资源，直接返回原始 URL，不通过代理
+                                    return relativePath_str;
+                                }
+                                
                                 if (relativePath_str.startsWith("data:") || relativePath_str.startsWith("mailto:") || relativePath_str.startsWith("javascript:") || relativePath_str.startsWith("chrome") || relativePath_str.startsWith("edge")) return relativePath_str;
                             } catch(e) {
                                 return relativePath_str;
@@ -9051,8 +10523,20 @@ async function handleProxyRequest(request, url) {
                         // 注入 XMLHttpRequest
                         var originalOpen = XMLHttpRequest.prototype.open;
                         XMLHttpRequest.prototype.open = function(method, url, async, user, password) {
-                            if (url) url = changeURL(url);
-                            arguments[1] = url;
+                            if (url) {
+                                // 检查是否是 Google 的静态资源，如果是则直接使用，不通过代理
+                                var urlStr = url.toString();
+                                if (urlStr.includes('gstatic.com') || 
+                                    urlStr.includes('googleapis.com') ||
+                                    urlStr.includes('google.com/recaptcha') ||
+                                    urlStr.includes('recaptcha.net')) {
+                                    // 直接使用原始 URL，不通过代理
+                                    arguments[1] = url;
+                                } else {
+                                    url = changeURL(url);
+                                    arguments[1] = url;
+                                }
+                            }
                             return originalOpen.apply(this, arguments);
                         };
                         
@@ -9067,6 +10551,23 @@ async function handleProxyRequest(request, url) {
                             } else {
                                 url = input;
                             }
+                            
+                            // 检查是否是 Google 的静态资源，如果是则直接使用，不通过代理
+                            var urlStr = url.toString();
+                            if (urlStr.includes('gstatic.com') || 
+                                urlStr.includes('googleapis.com') ||
+                                urlStr.includes('google.com/recaptcha') ||
+                                urlStr.includes('recaptcha.net')) {
+                                // 直接使用原始 URL，不通过代理
+                                if (typeof input === 'string') {
+                                    return originalFetch(url, init);
+                                } else if (input instanceof Request) {
+                                    return originalFetch(input, init);
+                                } else {
+                                    return originalFetch(input, init);
+                                }
+                            }
+                            
                             url = changeURL(url);
                             if (typeof input === 'string') {
                                 return originalFetch(url, init);
@@ -9080,7 +10581,16 @@ async function handleProxyRequest(request, url) {
                         var originalSetAttribute = HTMLElement.prototype.setAttribute;
                         HTMLElement.prototype.setAttribute = function (name, value) {
                             if (name == "src" || name == "href" || name == "action") {
-                                value = changeURL(value);
+                                // 检查是否是 Google 的静态资源，如果是则直接使用，不通过代理
+                                var valueStr = value.toString();
+                                if (valueStr.includes('gstatic.com') || 
+                                    valueStr.includes('googleapis.com') ||
+                                    valueStr.includes('google.com/recaptcha') ||
+                                    valueStr.includes('recaptcha.net')) {
+                                    // 直接使用原始值，不通过代理
+                                } else {
+                                    value = changeURL(value);
+                                }
                             }
                             originalSetAttribute.call(this, name, value);
                         };
