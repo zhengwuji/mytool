@@ -25,4 +25,4 @@ TG_BOT_TOKEN=你的Telegram Bot Token
 TG_CHAT_ID=你的Telegram频道ID
 ```
 
-还需要绑定 KV 命名空间（变量名为 `C`）用于存储文件元数据。
+还需要绑定 KV 命名空间（变量名为 `C`）大写C 用于存储文件元数据。
