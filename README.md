@@ -1,4 +1,4 @@
- 新增功能
+绑定名称必须是 KV_STORE  Workers KV空间名称随意
 
 ### 1. 图片上传 (Image Upload)
 - **API端点**: `/api/upload-image`
